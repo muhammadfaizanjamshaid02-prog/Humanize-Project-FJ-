@@ -9,6 +9,19 @@ names, numbers and dates provably unchanged.
 Built with React + Vite (client) and Node + Express (server). No database
 in this MVP: history is kept in the browser (localStorage).
 
+## Login gate
+
+The app opens behind a playful, cartoon-style **login gate**: an animated
+transparent (glass) screen with the author's avatar greeting you and a
+single password field. The password is checked **entirely in the browser
+against a SHA-256 hash only** — the plaintext password appears nowhere in
+the code. A correct entry unlocks the app for that browser session
+(`sessionStorage`); the 🔒 Lock button in the header locks it again.
+
+Be clear about what this is: a **personal/show gate for the demo, not real
+security**. Anyone technical can read a client-side hash check. Real user
+accounts (server-side auth) arrive with the Phase-3 server work.
+
 ## The algorithm — v2, built so there is no room for a silent mistake
 
 ```

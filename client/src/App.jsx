@@ -1,8 +1,94 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   humanizeLocal, verifyEdit, synonymAlternatives,
   PURPOSES, PURPOSE_DEFAULTS, DEPTHS,
 } from './humanizerClient.js';
+import { AVATAR_DATA_URI } from './avatarData.js';
+
+/* ------------------------------------------------------------------ */
+/* Login gate (personal/show gate for the demo — NOT real security).  */
+/* Only the SHA-256 hex digest of the gate password lives in code.    */
+/* The check runs through crypto.subtle where available (https /      */
+/* localhost); a small synchronous SHA-256 below is the fallback for  */
+/* non-secure contexts, so the SAME digest constant is used either    */
+/* way and no second constant ever has to be derived or stored.       */
+/* ------------------------------------------------------------------ */
+const GATE_HASH =
+  '9d2ab51950ca9cd3cc0f1dd02a88ff405e01dfc00c455e78886d193f9445d64e';
+const GATE_KEY = 'humanize-unlocked';
+
+function sha256HexSync(text) {
+  const K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+  const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+  const bytes = Array.from(new TextEncoder().encode(text));
+  const bitLen = bytes.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  bytes.push(0, 0, 0, 0,
+    (bitLen >>> 24) & 0xff, (bitLen >>> 16) & 0xff,
+    (bitLen >>> 8) & 0xff, bitLen & 0xff);
+  let H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  const w = new Array(64);
+  for (let block = 0; block < bytes.length; block += 64) {
+    for (let t = 0; t < 16; t += 1) {
+      const i = block + t * 4;
+      w[t] = (bytes[i] << 24) | (bytes[i + 1] << 16) | (bytes[i + 2] << 8) | bytes[i + 3];
+    }
+    for (let t = 16; t < 64; t += 1) {
+      const s0 = rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ (w[t - 15] >>> 3);
+      const s1 = rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ (w[t - 2] >>> 10);
+      w[t] = (w[t - 16] + s0 + w[t - 7] + s1) | 0;
+    }
+    let [a, b, c, d, e, f, g, h] = H;
+    for (let t = 0; t < 64; t += 1) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + S1 + ch + K[t] + w[t]) | 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) | 0;
+      h = g; g = f; f = e; e = (d + temp1) | 0;
+      d = c; c = b; b = a; a = (temp1 + temp2) | 0;
+    }
+    H = [(H[0] + a) | 0, (H[1] + b) | 0, (H[2] + c) | 0, (H[3] + d) | 0,
+      (H[4] + e) | 0, (H[5] + f) | 0, (H[6] + g) | 0, (H[7] + h) | 0];
+  }
+  return H.map((x) => (x >>> 0).toString(16).padStart(8, '0')).join('');
+}
+
+async function checkGatePassword(typed) {
+  try {
+    if (window.crypto && crypto.subtle) {
+      const digest = await crypto.subtle.digest(
+        'SHA-256', new TextEncoder().encode(typed),
+      );
+      const hex = [...new Uint8Array(digest)]
+        .map((b) => b.toString(16).padStart(2, '0')).join('');
+      return hex === GATE_HASH;
+    }
+  } catch {
+    /* fall through to the synchronous implementation */
+  }
+  return sha256HexSync(typed) === GATE_HASH;
+}
+
+function gateWasUnlocked() {
+  try {
+    return sessionStorage.getItem(GATE_KEY) === 'yes';
+  } catch {
+    return false;
+  }
+}
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 const MODES = ['Natural', 'Simple', 'Academic', 'Casual', 'Professional'];
@@ -65,7 +151,7 @@ function matchCase(original, replacement) {
   return replacement;
 }
 
-export default function App() {
+function MainApp({ onLock }) {
   const [input, setInput] = useState('');
   const [mode, setMode] = useState('Natural');
   const [intensity, setIntensity] = useState('Medium');
@@ -299,6 +385,9 @@ export default function App() {
         {serverEngine === 'demo' && <span className="badge demo">Demo Mode</span>}
         {serverEngine === 'llm' && <span className="badge llm">AI Engine</span>}
         {serverEngine === 'offline' && <span className="badge demo">Demo Mode</span>}
+        <button type="button" className="btn ghost small lock-btn" onClick={onLock}>
+          🔒 Lock
+        </button>
       </header>
 
       <main className="layout">
@@ -659,4 +748,121 @@ export default function App() {
       </footer>
     </div>
   );
+}
+
+/* ------------------------------------------------------------------ */
+/* Cartoon login gate: animated glass card, Faizan's avatar with a    */
+/* speech bubble, and a hash-only password check. While locked, ONLY  */
+/* this screen renders — the main app is not mounted at all.          */
+/* ------------------------------------------------------------------ */
+function LoginGate({ onUnlock }) {
+  const [pw, setPw] = useState('');
+  const [error, setError] = useState(false);
+  const [success, setSuccess] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [shaking, setShaking] = useState(false);
+  const inputRef = useRef(null);
+
+  async function submit(e) {
+    e.preventDefault();
+    if (success || checking) return;
+    setChecking(true);
+    const ok = await checkGatePassword(pw);
+    setChecking(false);
+    if (ok) {
+      setError(false);
+      setSuccess(true);
+      setTimeout(() => {
+        try {
+          sessionStorage.setItem(GATE_KEY, 'yes');
+        } catch {
+          /* session storage unavailable — unlock for this view anyway */
+        }
+        onUnlock();
+      }, 750);
+    } else {
+      setError(true);
+      setShaking(true);
+      setPw('');
+      if (inputRef.current) inputRef.current.focus();
+    }
+  }
+
+  return (
+    <div className="login-screen">
+      <div className="blob blob-1" />
+      <div className="blob blob-2" />
+      <div className="blob blob-3" />
+      <div className="star star-1" />
+      <div className="star star-2" />
+      <div className="star star-3" />
+      <div className="star star-4" />
+      <div className="sunburst" aria-hidden="true" />
+      <div className="orbit" aria-hidden="true">
+        <span className="orbit-item orbit-top">⭐</span>
+        <span className="orbit-item orbit-right">☁️</span>
+        <span className="orbit-item orbit-bottom">🎈</span>
+        <span className="orbit-item orbit-left">🌈</span>
+      </div>
+      <div className="sun-face" aria-hidden="true">🌞</div>
+      <div
+        className={`login-card${shaking ? ' shake' : ''}`}
+        onAnimationEnd={(e) => {
+          if (e.target === e.currentTarget) setShaking(false);
+        }}
+      >
+        <div className="speech-bubble" key={success ? 'yay' : 'hello'}>
+          {success
+            ? 'Yahoo! Sahi password 🎉 Khul raha hai…'
+            : 'Hello! 👋 Main Faizan — HumanizeAI mein khush aamdeed! Andar aane ke liye password likho.'}
+        </div>
+        <div className="avatar-wrap">
+          <img
+            className={`login-avatar${success ? ' jump' : ''}`}
+            src={AVATAR_DATA_URI}
+            alt="Muhammad Faizan Jamshaid"
+          />
+          <span className="wave-hand" aria-hidden="true">👋</span>
+        </div>
+        <h1 className="login-name">Muhammad Faizan Jamshaid</h1>
+        <p className="login-sub">
+          Humanize<span className="accent">AI</span> — pehle password, phir magic ✨
+        </p>
+        <form className="login-form" onSubmit={submit}>
+          <input
+            ref={inputRef}
+            className="login-input"
+            type="password"
+            value={pw}
+            onChange={(e) => setPw(e.target.value)}
+            placeholder="Password likho…"
+            autoComplete="off"
+            autoFocus
+          />
+          <button type="submit" className="login-btn" disabled={checking || success}>
+            {success ? 'Khul gaya 🎉' : checking ? 'Check ho raha hai…' : 'Kholo 🔓'}
+          </button>
+        </form>
+        {error && <p className="login-error">Ghalat password 😅 Dobara koshish karo.</p>}
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [unlocked, setUnlocked] = useState(gateWasUnlocked);
+
+  function lock() {
+    try {
+      sessionStorage.removeItem(GATE_KEY);
+    } catch {
+      /* ignore — state change below still re-locks the view */
+    }
+    setUnlocked(false);
+  }
+
+  if (!unlocked) {
+    return <LoginGate onUnlock={() => setUnlocked(true)} />;
+  }
+  return <MainApp onLock={lock} />;
 }

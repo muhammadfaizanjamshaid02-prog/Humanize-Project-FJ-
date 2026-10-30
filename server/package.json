@@ -1,0 +1,1 @@
+{"dependencies":{"cors":"^2.8.5","express":"^4.19.2"},"description":"HumanizeAI backend — multi-pass paragraph humanizer (protect, rewrite, meaning-check, accept gate)","main":"server.js","name":"humanize-ai-server","scripts":{"start":"node server.js"},"version":"1.0.0"}

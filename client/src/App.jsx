@@ -114,6 +114,20 @@ export default function App() {
 
   const checks = result ? result.checks : null;
   const accepted = result && result.status === 'Accepted';
+  const returnedOriginal = result && result.status === 'Returned original';
+
+  // Plain-language list of exactly which v2 checks failed.
+  const failedChecks = [];
+  if (checks && returnedOriginal) {
+    if (!checks.entitiesPreserved) failedChecks.push('a name or protected item changed');
+    if (!checks.numbersPreserved) failedChecks.push('a number or date changed');
+    if (!checks.negationPreserved) failedChecks.push('a "not / never / no" wording changed — that can flip the meaning');
+    if (checks.meaningScore < 85) failedChecks.push(`meaning score was only ${checks.meaningScore}% (needs 85%)`);
+    if (checks.coverage < 85) failedChecks.push(`only ${checks.coverage}% of the original facts survived (needs 85%)`);
+    if (checks.newConceptRatio > 20) failedChecks.push(`${checks.newConceptRatio}% new facts appeared that were not in your paragraph (max 20%)`);
+    if (checks.lengthRatio < 0.6 || checks.lengthRatio > 1.5) failedChecks.push(`the length changed too much (${checks.lengthRatio}×)`);
+    if (!checks.doubleVerified) failedChecks.push('the two verification runs did not agree');
+  }
 
   return (
     <div className="page">
@@ -188,7 +202,7 @@ export default function App() {
 
         <section className="panel">
           <div className="panel-head">
-            <h2>Humanized paragraph</h2>
+            <h2>{returnedOriginal ? 'Your paragraph (returned unchanged)' : 'Humanized paragraph'}</h2>
             {result && <span className="word-count">{countWords(result.output)} words · {result.engine === 'llm' ? 'AI engine' : 'Demo engine'}</span>}
           </div>
           <div className="output-box">
@@ -204,10 +218,22 @@ export default function App() {
           </div>
 
           {result && checks && (
-            <div className={`gate ${accepted ? 'gate-ok' : 'gate-warn'}`}>
+            <div className={`gate ${accepted ? 'gate-ok' : 'gate-fail'}`}>
               <div className="gate-status">
-                {accepted ? '✓ Accepted' : '⚠ Check manually'}
+                {accepted ? '✓ Accepted' : '⛔ Returned original — rewrite rejected'}
               </div>
+              {checks.naturalnessScore != null && (
+                <div className="naturalness">
+                  <span className="naturalness-label">Naturalness Score</span>
+                  <span className="naturalness-value">
+                    {checks.naturalnessIn} → {checks.naturalnessScore}
+                  </span>
+                  <p className="naturalness-note">
+                    Naturalness = how human the writing patterns are. This is not any
+                    detector's score — no tool can guarantee a detector result.
+                  </p>
+                </div>
+              )}
               <div className="gate-grid">
                 <div>
                   <span className="gate-value">{checks.meaningScore}%</span>
@@ -222,15 +248,58 @@ export default function App() {
                   <span className="gate-label">Numbers &amp; Dates</span>
                 </div>
                 <div>
+                  <span className="gate-value">{checks.negationPreserved ? '✓' : '✗'}</span>
+                  <span className="gate-label">Negation Lock</span>
+                </div>
+                <div>
+                  <span className="gate-value">{checks.coverage}%</span>
+                  <span className="gate-label">Fact Coverage</span>
+                </div>
+                <div>
+                  <span className="gate-value">{checks.newConceptRatio}%</span>
+                  <span className="gate-label">New Facts</span>
+                </div>
+                <div>
                   <span className="gate-value">{checks.lengthRatio}×</span>
                   <span className="gate-label">Length Ratio</span>
+                </div>
+                <div>
+                  <span className="gate-value">{checks.doubleVerified ? '✓' : '✗'}</span>
+                  <span className="gate-label">Double Verified</span>
                 </div>
               </div>
               <p className="gate-note">
                 {accepted
-                  ? 'This rewrite passed every check: names, numbers and meaning are all intact.'
-                  : 'This rewrite did not pass every check. Read it side by side with your original before using it.'}
+                  ? 'This rewrite passed all six safety checks, verified twice: names, numbers, negations and meaning are all intact, every fact survived, and no new facts were added.'
+                  : 'The rewrite was not safe, so it was rejected and your original paragraph is returned untouched. Nothing in it was changed.'}
               </p>
+              {checks.readabilityIn != null && (
+                <p className="gate-stats">
+                  Readability (Flesch): {checks.readabilityIn} → {checks.readabilityOut}
+                  {' · '}Repetition index: {checks.repetitionIn} → {checks.repetitionOut}
+                  {checks.candidatesTried != null && (
+                    <>{' · '}Candidates tried: {checks.candidatesTried}, passed the gate: {checks.candidatesPassed}</>
+                  )}
+                </p>
+              )}
+              {returnedOriginal && result.rejectedOutput && (
+                <details className="gate-details">
+                  <summary>Why was it rejected?</summary>
+                  {failedChecks.length > 0 && (
+                    <ul>
+                      {failedChecks.map((f) => <li key={f}>{f}</li>)}
+                    </ul>
+                  )}
+                  {checks.missingConcepts && checks.missingConcepts.length > 0 && (
+                    <p>Missing facts: {checks.missingConcepts.join(', ')}</p>
+                  )}
+                  {checks.newConcepts && checks.newConcepts.length > 0 && (
+                    <p>New facts that appeared: {checks.newConcepts.join(', ')}</p>
+                  )}
+                  <p className="gate-rejected-label">The rejected rewrite (not delivered):</p>
+                  <p className="gate-rejected">{result.rejectedOutput}</p>
+                </details>
+              )}
             </div>
           )}
         </section>
@@ -251,6 +320,9 @@ export default function App() {
                   <span className="history-text">{h.result.output.slice(0, 110)}…</span>
                   <span className="history-meta">
                     {h.mode} · {h.intensity} · {h.result.status} · Meaning {h.result.checks.meaningScore}%
+                    {h.result.checks.naturalnessScore != null && (
+                      <> · Naturalness {h.result.checks.naturalnessIn} → {h.result.checks.naturalnessScore}</>
+                    )}
                   </span>
                 </button>
               </li>

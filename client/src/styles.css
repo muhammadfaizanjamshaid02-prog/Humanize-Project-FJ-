@@ -81,14 +81,35 @@ textarea:focus { outline: 2px solid #5b5bd6; outline-offset: 1px; }
   border: 1.5px solid;
 }
 .gate-ok { background: #edf9f1; border-color: #35a05a; }
-.gate-warn { background: #fff7e6; border-color: #d99a16; }
+.gate-fail { background: #fdecea; border-color: #cf3f3f; }
 .gate-status { font-size: 18px; font-weight: 800; margin-bottom: 10px; }
 .gate-ok .gate-status { color: #116b35; }
-.gate-warn .gate-status { color: #8a6100; }
+.gate-fail .gate-status { color: #8f1d1d; }
 .gate-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; text-align: center; }
 .gate-value { display: block; font-size: 20px; font-weight: 800; }
 .gate-label { display: block; font-size: 12px; color: #55607a; margin-top: 2px; }
 .gate-note { margin: 10px 0 0; font-size: 13px; color: #44506a; }
+.gate-stats { margin: 6px 0 0; font-size: 12px; color: #7a8499; }
+.naturalness {
+  margin-bottom: 12px; padding: 10px 12px; border-radius: 10px;
+  background: rgba(255, 255, 255, 0.65); border: 1px dashed #9db8a6;
+  text-align: center;
+}
+.gate-fail .naturalness { border-color: #d8a1a1; }
+.naturalness-label {
+  display: block; font-size: 12px; font-weight: 700; letter-spacing: 0.4px;
+  text-transform: uppercase; color: #55607a;
+}
+.naturalness-value { display: block; font-size: 26px; font-weight: 800; margin: 2px 0; }
+.naturalness-note { margin: 0; font-size: 12px; color: #55607a; }
+.gate-details { margin-top: 12px; font-size: 13px; color: #5a2b2b; }
+.gate-details summary { cursor: pointer; font-weight: 700; }
+.gate-details ul { margin: 8px 0; padding-left: 18px; }
+.gate-rejected-label { margin: 8px 0 4px; font-weight: 700; }
+.gate-rejected {
+  margin: 0; padding: 10px; border: 1px dashed #cf3f3f; border-radius: 8px;
+  background: #fff5f5; white-space: pre-wrap;
+}
 
 .history { margin-top: 18px; }
 .history ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }

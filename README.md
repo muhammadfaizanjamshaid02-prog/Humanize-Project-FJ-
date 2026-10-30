@@ -182,6 +182,19 @@ long, unknown mode) come back as clean JSON messages.
 > `npm install` again. For that reason this project is shared **without**
 > `package-lock.json` files.
 
+## Live on GitHub Pages
+
+This site also runs as a **fully static build on GitHub Pages** — no
+server, no API key. The Pages build carries the **same v2 demo
+algorithm in the browser**: `client/src/humanizerClient.js` is a
+browser port of the demo-engine pipeline in `server/humanizer.js`
+(PROTECT → 3 candidate rewrites → the six-check gate, double-verified
+→ naturalness loop → fail-safe). The app always tries the Express API
+first; when no API answers (as on Pages), it automatically falls back
+to the in-browser engine, and the header shows **Demo Mode**. The full
+server version additionally supports the **LLM engine** when an API
+key is configured — that is the only difference.
+
 ## Roadmap — Phase 3 (not in this MVP)
 
 - User accounts (register / login with JWT)

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { humanizeLocal } from './humanizerClient.js';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 const MODES = ['Natural', 'Simple', 'Academic', 'Casual', 'Professional'];
@@ -32,8 +33,17 @@ export default function App() {
   const [history, setHistory] = useState(loadHistory);
 
   useEffect(() => {
+    // On a fully static host (e.g. GitHub Pages) there is no API:
+    // the health request 404s or returns HTML instead of JSON. That
+    // is not an error state for the user — the demo algorithm also
+    // runs entirely in the browser (see humanizerClient.js) — so any
+    // failure here simply lands on 'offline', which the header badge
+    // presents as Demo Mode.
     fetch(`${API_BASE}/api/health`)
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error('no api');
+        return r.json();
+      })
       .then((d) => setServerEngine(d.engine))
       .catch(() => setServerEngine('offline'));
   }, []);
@@ -57,13 +67,41 @@ export default function App() {
     }
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/humanize`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: input, mode, intensity }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Something went wrong.');
+      // 1) Server first: when the Express API is reachable (local dev,
+      //    or a deployed server via VITE_API_URL) its answer is used
+      //    exactly as before — including its JSON validation errors,
+      //    which are authoritative and shown as-is.
+      let data = null;
+      let serverError = null;
+      try {
+        const res = await fetch(`${API_BASE}/api/humanize`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: input, mode, intensity }),
+        });
+        let parsed = null;
+        try {
+          parsed = await res.json();
+        } catch {
+          parsed = null; // non-JSON answer (e.g. a static host's 404 page)
+        }
+        if (parsed && res.ok) data = parsed;
+        else if (parsed && parsed.error) serverError = parsed.error;
+        // A non-OK / non-JSON response means "no API here" — fall
+        // through to the in-browser engine instead of failing.
+      } catch {
+        data = null; // network failure — fall through to local engine
+      }
+      if (serverError) throw new Error(serverError);
+
+      // 2) Static-host fallback (GitHub Pages): run the SAME v2 demo
+      //    algorithm in the browser. Its validation errors carry the
+      //    same messages as the server's and surface the same way.
+      if (!data) {
+        data = { ...humanizeLocal(input, mode, intensity), local: true };
+        setServerEngine('offline');
+      }
+
       setResult(data);
       const entry = {
         id: Date.now(),
@@ -74,11 +112,7 @@ export default function App() {
       };
       setHistory((h) => [entry, ...h].slice(0, 10));
     } catch (e) {
-      setError(
-        e.message === 'Failed to fetch'
-          ? 'Could not reach the server. Is it running on port 5000?'
-          : e.message,
-      );
+      setError(e.message);
     } finally {
       setLoading(false);
     }
@@ -138,7 +172,7 @@ export default function App() {
         </div>
         {serverEngine === 'demo' && <span className="badge demo">Demo Mode</span>}
         {serverEngine === 'llm' && <span className="badge llm">AI Engine</span>}
-        {serverEngine === 'offline' && <span className="badge offline">Server offline</span>}
+        {serverEngine === 'offline' && <span className="badge demo">Demo Mode</span>}
       </header>
 
       <main className="layout">
@@ -203,7 +237,7 @@ export default function App() {
         <section className="panel">
           <div className="panel-head">
             <h2>{returnedOriginal ? 'Your paragraph (returned unchanged)' : 'Humanized paragraph'}</h2>
-            {result && <span className="word-count">{countWords(result.output)} words · {result.engine === 'llm' ? 'AI engine' : 'Demo engine'}</span>}
+            {result && <span className="word-count">{countWords(result.output)} words · {result.engine === 'llm' ? 'AI engine' : result.local ? 'Demo engine · in browser' : 'Demo engine'}</span>}
           </div>
           <div className="output-box">
             {result ? result.output : <span className="placeholder">Your humanized paragraph will appear here.</span>}

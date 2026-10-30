@@ -2,7 +2,7 @@
 
 const express = require('express');
 const cors = require('cors');
-const { humanize, llmConfig, MODES, INTENSITIES } = require('./humanizer');
+const { humanize, llmConfig, MODES, INTENSITIES, PURPOSES, DEPTHS } = require('./humanizer');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -22,7 +22,10 @@ app.get('/api/health', (req, res) => {
 
 app.post('/api/humanize', async (req, res) => {
   try {
-    const { text, mode = 'Natural', intensity = 'Medium' } = req.body || {};
+    const {
+      text, mode = 'Natural', intensity = 'Medium',
+      purpose = 'General', depth = 'Advanced', voiceSample,
+    } = req.body || {};
 
     if (typeof text !== 'string' || !text.trim()) {
       return res.status(400).json({ error: 'Please paste a paragraph first.' });
@@ -33,6 +36,16 @@ app.post('/api/humanize', async (req, res) => {
     if (!INTENSITIES.includes(intensity)) {
       return res.status(400).json({ error: `Unknown intensity. Choose one of: ${INTENSITIES.join(', ')}.` });
     }
+    // v3 fields — all optional; validated only when supplied.
+    if (!PURPOSES.includes(purpose)) {
+      return res.status(400).json({ error: `Unknown purpose. Choose one of: ${PURPOSES.join(', ')}.` });
+    }
+    if (!DEPTHS.includes(depth)) {
+      return res.status(400).json({ error: `Unknown depth. Choose one of: ${DEPTHS.join(', ')}.` });
+    }
+    if (voiceSample !== undefined && voiceSample !== null && typeof voiceSample !== 'string') {
+      return res.status(400).json({ error: 'Voice sample must be text.' });
+    }
 
     const words = text.trim().split(/\s+/).filter(Boolean).length;
     if (words < 10) {
@@ -42,7 +55,9 @@ app.post('/api/humanize', async (req, res) => {
       return res.status(400).json({ error: 'Paragraph is too long — the limit is 1000 words.' });
     }
 
-    const result = await humanize(text.trim(), mode, intensity);
+    const result = await humanize(text.trim(), mode, intensity, {
+      purpose, depth, voiceSample: voiceSample || null,
+    });
     return res.json(result);
   } catch (err) {
     console.error(err);

@@ -19,10 +19,111 @@
  *                   gets the original paragraph back unchanged with
  *                   status "Returned original" and the flawed candidate
  *                   kept aside in `rejectedOutput` for transparency.
+ *
+ * v3 (premium-level features, grounded in a sourced comparison of the
+ * DeepAI / QuillBot / Grammarly humanizers, Oct 2026):
+ *  - PURPOSE PRESETS (DeepAI-style): General, Essay, Assignment,
+ *    Article, Email, Marketing, Story — each sets Mode+Intensity
+ *    defaults and tunes the demo engine (splitting thresholds,
+ *    contraction voice, rotation strength) + the LLM prompt.
+ *  - DEPTH (QuillBot Basic vs Advanced): Basic = 1 candidate, gate
+ *    still applied (single verification run), fail-safe still applies;
+ *    Advanced = the full v2 loop (3 candidates, double verification,
+ *    naturalness competition). Gate conditions are identical in both.
+ *  - CUSTOM VOICE (Grammarly-style): an optional writing sample
+ *    (>= 40 words) is reduced to style STATISTICS only (average
+ *    sentence length, contraction tendency, average word length);
+ *    the raw sample never enters the LLM prompt. The stats bias
+ *    contraction behaviour and add a voice-match bonus when the
+ *    winning candidate is selected.
+ *  - COMPARE CANDIDATES (QuillBot Compare-Modes style): the response
+ *    exposes every gate-passing candidate with its own full checks,
+ *    so the UI can let the user inspect and pick another rewrite.
  */
 
 const MODES = ['Natural', 'Simple', 'Academic', 'Casual', 'Professional'];
 const INTENSITIES = ['Light', 'Medium', 'Strong'];
+
+/* v3 — PURPOSE PRESETS (DeepAI-style). Each preset names the Mode +
+ * Intensity a user most likely wants for that job; the UI applies
+ * these as defaults when the preset is picked (the user can still
+ * override Mode/Intensity afterwards). The server ALSO applies the
+ * preset's behaviour tuning in purposeTuning() below, so direct API
+ * callers get the same behaviour as UI users. */
+const PURPOSES = ['General', 'Essay', 'Assignment', 'Article', 'Email', 'Marketing', 'Story'];
+const PURPOSE_DEFAULTS = {
+  General: { mode: 'Natural', intensity: 'Medium' },
+  Essay: { mode: 'Academic', intensity: 'Medium' },
+  Assignment: { mode: 'Academic', intensity: 'Medium' },
+  Article: { mode: 'Natural', intensity: 'Medium' },
+  Email: { mode: 'Casual', intensity: 'Medium' },
+  Marketing: { mode: 'Natural', intensity: 'Strong' },
+  Story: { mode: 'Natural', intensity: 'Medium' },
+};
+const DEPTHS = ['Basic', 'Advanced'];
+
+/* Behaviour tuning per purpose, consumed by demoRewrite():
+ *  - splitMinBefore / splitMinAfter: clause-size thresholds for the
+ *    ", and" sentence split (LOWER = shorter sentences, HIGHER =
+ *    longer flowing sentences)
+ *  - alwaysSplit: run the splitting pass even below Strong intensity
+ *  - rotateFrom: repetition-rotation starts at this occurrence
+ *  - contraction: 'on' forces contractions, 'off' forces expansions
+ *    (formal writing), null = follow the Mode as in v2
+ * Email wants short, easy-to-scan sentences; Marketing wants punchy
+ * short lines + stronger word rotation; Story wants long flowing
+ * sentences kept intact; Essay/Assignment are formal (no
+ * contractions); Article and General keep the v2 behaviour. */
+function purposeTuning(purpose) {
+  switch (purpose) {
+    case 'Email':
+      return { splitMinBefore: 5, splitMinAfter: 4, alwaysSplit: true, contraction: 'on' };
+    case 'Marketing':
+      return { splitMinBefore: 4, splitMinAfter: 4, alwaysSplit: true, rotateFrom: 2, contraction: 'on' };
+    case 'Story':
+      return { splitMinBefore: 10, splitMinAfter: 8, alwaysSplit: false, contraction: 'on' };
+    case 'Essay':
+    case 'Assignment':
+      return { contraction: 'off' };
+    default: // General, Article
+      return {};
+  }
+}
+
+/* v3 — CUSTOM VOICE statistics (Grammarly-style). A writing sample is
+ * NEVER used raw: it is reduced to three style statistics and only
+ * those numbers travel onward (the LLM prompt receives the stats,
+ * not the sample — privacy by design). Returns null unless the
+ * sample has at least 40 words, so a stray sentence cannot pretend
+ * to be a voice. */
+function voiceStats(sample) {
+  if (typeof sample !== 'string') return null;
+  const words = sample.trim().split(/\s+/).filter(Boolean);
+  if (words.length < 40) return null;
+  const sentences = sample.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
+  const sentenceCount = Math.max(1, sentences.length);
+  const letters = words.reduce((n, w) => n + w.replace(/[^A-Za-z]/g, '').length, 0);
+  const usesContractions = /(n't\b)|[A-Za-z]+'(s|re|ve|ll|d|m)\b/i.test(sample);
+  return {
+    avgSentenceWords: Math.round((words.length / sentenceCount) * 10) / 10,
+    avgWordLength: Math.round((letters / words.length) * 100) / 100,
+    usesContractions,
+    sampleWords: words.length,
+  };
+}
+
+/* Voice-match bonus for candidate selection: up to +12 selection
+ * points, shrinking as the candidate's average sentence length moves
+ * away from the sample's. It is a TIEBREAKER-grade bonus only — it is
+ * added AFTER the meaning gate, so it can never rescue a candidate
+ * that failed any check (the gate still outranks everything). */
+function voiceBonus(candidate, stats) {
+  if (!stats) return 0;
+  const sentences = sentenceList(candidate);
+  if (sentences.length === 0) return 0;
+  const avg = candidate.trim().split(/\s+/).filter(Boolean).length / sentences.length;
+  return Math.max(0, 12 - Math.abs(avg - stats.avgSentenceWords) * 1.2);
+}
 
 /* ------------------------------------------------------------------ */
 /* Pass 1 — PROTECT                                                    */
@@ -231,14 +332,17 @@ function applySynonyms(text, intensity) {
   return out;
 }
 
-function splitLongSentences(text) {
-  // Split on ';' always; split on ', and' only when both sides are real clauses.
+function splitLongSentences(text, minBefore = 6, minAfter = 5) {
+  // Split on ';' always; split on ', and' only when both sides are real
+  // clauses. The thresholds come from the purpose preset (v3): Email /
+  // Marketing pass lower values (shorter sentences), Story passes
+  // higher ones (long flowing sentences survive).
   let out = text.replace(/\s*;\s*/g, '. ');
   out = out.replace(/, and /g, (m, offset, whole) => {
     const before = whole.slice(0, offset);
     const lastSentence = before.slice(Math.max(before.lastIndexOf('. '), 0));
     const afterWords = whole.slice(offset + m.length).split(/\s+/).length;
-    if (lastSentence.trim().split(/\s+/).length >= 6 && afterWords >= 5) return '. And ';
+    if (lastSentence.trim().split(/\s+/).length >= minBefore && afterWords >= minAfter) return '. And ';
     return m;
   });
   return out;
@@ -385,7 +489,7 @@ function mergeShortSentences(text) {
  *       of very short sentences (bigger sentence-length variation)
  *   C — rotation emphasis: synonyms rotate from the 2nd occurrence
  *       and transition de-duplication runs in its strictest form */
-function demoRewrite(protectedText, mode, intensity, strategy = 'A') {
+function demoRewrite(protectedText, mode, intensity, strategy = 'A', tune = {}) {
   let out = protectedText;
 
   // 1) Robotic filler & connectors
@@ -397,26 +501,35 @@ function demoRewrite(protectedText, mode, intensity, strategy = 'A') {
   const simpleFirst = mode === 'Simple' ? 'Strong' : intensity;
   out = applySynonyms(out, simpleFirst);
 
-  // 3) Voice: contractions for natural/casual voices, expansions for formal ones
-  if (mode === 'Natural' || mode === 'Casual') {
+  // 3) Voice: contractions for natural/casual voices, expansions for
+  //    formal ones. v3: a purpose preset or a Custom Voice sample can
+  //    override the Mode default via tune.contraction ('on' | 'off'),
+  //    resolved by the caller in humanize() (voice > purpose > mode).
+  const contractionAction = tune.contraction
+    || (mode === 'Natural' || mode === 'Casual' ? 'on'
+      : (mode === 'Academic' || mode === 'Professional' ? 'off' : null));
+  if (contractionAction === 'on') {
     for (const [full, short] of CONTRACTIONS) {
       out = replacePhrase(out, full, short, true);
     }
-  } else if (mode === 'Academic' || mode === 'Professional') {
+  } else if (contractionAction === 'off') {
     for (const [short, full] of EXPANSIONS) {
       out = out.replace(new RegExp(`\\b${short.replace("'", "['’]")}\\b`, 'gi'),
         (m) => matchCase(m, full));
     }
   }
 
-  // 4) Technique 8: repetition reduction (C rotates from the 2nd use)
-  out = reduceRepetition(out, strategy === 'C' ? 2 : 3);
+  // 4) Technique 8: repetition reduction (C rotates from the 2nd use;
+  //    a purpose preset such as Marketing can also lower the trigger)
+  out = reduceRepetition(out, tune.rotateFrom ?? (strategy === 'C' ? 2 : 3));
 
   // 5) Sentence rhythm: split heavy sentences on Strong (and for
-  //    Simple mode); strategy B always restructures, then merges shorts
+  //    Simple mode); strategy B always restructures, then merges
+  //    shorts. v3: purpose presets can force the pass (Email /
+  //    Marketing) and set its clause-size thresholds.
   if (intensity === 'Strong' || (mode === 'Simple' && intensity === 'Medium')
-    || strategy === 'B') {
-    out = splitLongSentences(out);
+    || strategy === 'B' || tune.alwaysSplit) {
+    out = splitLongSentences(out, tune.splitMinBefore ?? 6, tune.splitMinAfter ?? 5);
   }
   if (strategy === 'B') out = mergeShortSentences(out);
 
@@ -454,10 +567,31 @@ const MODE_GUIDANCE = {
   Professional: 'Polished workplace tone: clear, direct, no slang, no contractions.',
 };
 
-function buildSystemPrompt(mode, intensity, stricter, natural) {
+/* v3: per-purpose guidance for the LLM prompt (server only), mirroring
+ * the demo engine's purposeTuning() so both engines aim the same way. */
+const PURPOSE_GUIDANCE = {
+  General: '',
+  Essay: 'This is an essay: formal academic register, full forms (no contractions), clear topic sentences.',
+  Assignment: 'This is a coursework assignment: formal and precise, full forms (no contractions), plain structure.',
+  Article: 'This is an article for general readers: engaging but clear, a mix of sentence lengths.',
+  Email: 'This is an email: prefer short, easy-to-scan sentences and a warm, direct tone. Contractions are welcome.',
+  Marketing: 'This is marketing copy: punchy, short sentences, energetic everyday words, no filler.',
+  Story: 'This is a story: keep sentences flowing and vivid; longer sentences are welcome, contractions are natural.',
+};
+
+function buildSystemPrompt(mode, intensity, stricter, natural, extra = {}) {
+  const voice = extra.voiceStats;
   return [
     `You rewrite a student's paragraph so it reads like natural human writing. Mode: ${mode}. Intensity: ${intensity}.`,
     MODE_GUIDANCE[mode] || MODE_GUIDANCE.Natural,
+    extra.purpose && PURPOSE_GUIDANCE[extra.purpose]
+      ? `Purpose: ${extra.purpose}. ${PURPOSE_GUIDANCE[extra.purpose]}`
+      : '',
+    // Custom Voice: ONLY the style statistics are given — never the
+    // user's raw writing sample (privacy by design, see voiceStats()).
+    voice
+      ? `Match this writing voice (measured from the user's own sample): average sentence length about ${voice.avgSentenceWords} words; ${voice.usesContractions ? 'the user uses contractions — use them too.' : 'the user does not use contractions — avoid them.'} Average word length about ${voice.avgWordLength} letters.`
+      : '',
     'Hard rules:',
     '1. Keep the meaning 100% the same. Add NO new facts. Remove NO facts.',
     '2. Tokens like ⟦E1⟧ are protected placeholders. Copy every one of them exactly, unchanged, in the same place in the meaning.',
@@ -487,7 +621,13 @@ async function llmRewrite(protectedText, mode, intensity, stricter, opts = {}) {
       model: cfg.model,
       temperature: opts.temperature ?? 0.7,
       messages: [
-        { role: 'system', content: buildSystemPrompt(mode, intensity, stricter, !!opts.natural) },
+        {
+          role: 'system',
+          content: buildSystemPrompt(mode, intensity, stricter, !!opts.natural, {
+            purpose: opts.purpose,
+            voiceStats: opts.voiceStats,
+          }),
+        },
         { role: 'user', content: protectedText },
       ],
     }),
@@ -873,44 +1013,82 @@ function verify(original, output, store) {
   const agree =
     first.accepted === second.accepted &&
     JSON.stringify(first.checks) === JSON.stringify(second.checks);
-  const checks = { ...first.checks, doubleVerified: agree };
+  const checks = { ...first.checks, doubleVerified: agree, verificationRuns: 2 };
   return { checks, accepted: first.accepted && second.accepted && agree };
+}
+
+/* Depth-aware verifier (v3): Advanced uses the full double
+ * verification above. Basic (the faster QuillBot-style path) applies
+ * the SAME six gate conditions in a single run — checks.verification
+ * Runs says honestly how many runs backed the verdict, and
+ * doubleVerified is false because only one run happened. */
+function verifyWithDepth(original, output, store, depth) {
+  if (depth === 'Basic') {
+    const single = runChecks(original, output, store);
+    return {
+      checks: { ...single.checks, doubleVerified: false, verificationRuns: 1 },
+      accepted: single.accepted,
+    };
+  }
+  return verify(original, output, store);
 }
 
 /* ------------------------------------------------------------------ */
 /* Pass 4 — GATE + main entry                                          */
 /* ------------------------------------------------------------------ */
 
-async function humanize(text, mode = 'Natural', intensity = 'Medium') {
+async function humanize(text, mode = 'Natural', intensity = 'Medium', options = {}) {
   const safeMode = MODES.includes(mode) ? mode : 'Natural';
   const safeIntensity = INTENSITIES.includes(intensity) ? intensity : 'Medium';
+  // v3 options — all optional, all backward compatible.
+  const safePurpose = PURPOSES.includes(options.purpose) ? options.purpose : 'General';
+  const safeDepth = options.depth === 'Basic' ? 'Basic' : 'Advanced';
+  const stats = voiceStats(options.voiceSample);
 
   const { protectedText, store } = protectEntities(text);
   const cfg = llmConfig();
   const naturalnessIn = naturalnessScore(text);
 
+  /* Demo-engine tuning: purpose preset first, then the Custom Voice
+   * sample's contraction tendency overrides it (voice > purpose >
+   * mode) — with one formal guard: an Academic rewrite for an Essay /
+   * Assignment never gains contractions from a casual sample. */
+  const tune = { ...purposeTuning(safePurpose) };
+  if (stats) {
+    const formalGuard = safeMode === 'Academic'
+      && (safePurpose === 'Essay' || safePurpose === 'Assignment');
+    if (!formalGuard) tune.contraction = stats.usesContractions ? 'on' : 'off';
+  }
+  const strategies = safeDepth === 'Basic' ? ['A'] : ['A', 'B', 'C'];
+
   /* NATURALNESS OPTIMIZATION LOOP: generate several candidates, run
    * EVERY one through the full meaning gate first, and only then —
-   * among the candidates that passed — pick the highest naturalness.
-   * The gate always outranks naturalness: a meaning-flawed candidate
-   * is never selected, however natural it reads. */
+   * among the candidates that passed — pick the best selection score
+   * (naturalness + voice-match bonus). The gate always outranks the
+   * score: a meaning-flawed candidate is never selected, however
+   * natural it reads. Depth Basic generates a single candidate and
+   * single-verifies it; the gate conditions are identical. */
   let engine = 'demo';
   const raw = [];
 
   if (cfg) {
     try {
-      const first = await llmRewrite(protectedText, safeMode, safeIntensity, false, { temperature: 0.7 });
+      const first = await llmRewrite(protectedText, safeMode, safeIntensity, false, {
+        temperature: 0.7, purpose: safePurpose, voiceStats: stats,
+      });
       if (first) {
         engine = 'llm';
         raw.push(restoreEntities(first, store));
-        const firstOk = verify(text, raw[0], store).accepted;
-        // Candidate 2: hotter + naturalness-focused; if candidate 1
-        // failed the gate it also carries the stricter instructions.
-        const second = await llmRewrite(
-          protectedText, safeMode, safeIntensity, !firstOk,
-          { temperature: 0.95, natural: true },
-        );
-        if (second) raw.push(restoreEntities(second, store));
+        if (safeDepth === 'Advanced') {
+          const firstOk = verifyWithDepth(text, raw[0], store, safeDepth).accepted;
+          // Candidate 2: hotter + naturalness-focused; if candidate 1
+          // failed the gate it also carries the stricter instructions.
+          const second = await llmRewrite(
+            protectedText, safeMode, safeIntensity, !firstOk,
+            { temperature: 0.95, natural: true, purpose: safePurpose, voiceStats: stats },
+          );
+          if (second) raw.push(restoreEntities(second, store));
+        }
       }
     } catch (_) {
       // LLM unreachable -> fall through to the offline demo engine so
@@ -922,9 +1100,9 @@ async function humanize(text, mode = 'Natural', intensity = 'Medium') {
 
   if (raw.length === 0) {
     engine = 'demo';
-    for (const strategy of ['A', 'B', 'C']) {
+    for (const strategy of strategies) {
       raw.push(restoreEntities(
-        demoRewrite(protectedText, safeMode, safeIntensity, strategy), store,
+        demoRewrite(protectedText, safeMode, safeIntensity, strategy, tune), store,
       ));
     }
   }
@@ -934,8 +1112,14 @@ async function humanize(text, mode = 'Natural', intensity = 'Medium') {
   const passed = [];
   let bestFailed = null;
   for (const candidate of candidates) {
-    const verdict = verify(text, candidate, store);
-    const entry = { candidate, verdict, naturalness: naturalnessScore(candidate) };
+    const verdict = verifyWithDepth(text, candidate, store, safeDepth);
+    const nat = naturalnessScore(candidate);
+    const entry = {
+      candidate,
+      verdict,
+      naturalness: nat,
+      selectionScore: nat + voiceBonus(candidate, stats),
+    };
     if (verdict.accepted) {
       passed.push(entry);
     } else if (!bestFailed
@@ -945,20 +1129,43 @@ async function humanize(text, mode = 'Natural', intensity = 'Medium') {
   }
 
   if (passed.length > 0) {
-    passed.sort((a, b) => b.naturalness - a.naturalness);
+    passed.sort((a, b) => b.selectionScore - a.selectionScore);
     const winner = passed[0];
+    const winnerChecks = {
+      ...winner.verdict.checks,
+      naturalnessScore: winner.naturalness,
+      naturalnessIn,
+      candidatesTried: candidates.length,
+      candidatesPassed: passed.length,
+    };
+    if (stats) winnerChecks.voiceMatch = true;
     return {
       output: winner.candidate,
       mode: safeMode,
       intensity: safeIntensity,
+      purpose: safePurpose,
+      depth: safeDepth,
+      voice: stats,
       engine,
-      checks: {
-        ...winner.verdict.checks,
-        naturalnessScore: winner.naturalness,
-        naturalnessIn,
-        candidatesTried: candidates.length,
-        candidatesPassed: passed.length,
-      },
+      checks: winnerChecks,
+      /* COMPARE CANDIDATES (v3): every gate-passing rewrite with its
+       * OWN full checks, best first, so the UI can offer the others
+       * for inspection/selection. winnerIndex points at the entry
+       * that `output` came from. */
+      candidates: passed.map((p) => ({
+        text: p.candidate,
+        naturalnessScore: p.naturalness,
+        passed: true,
+        checks: {
+          ...p.verdict.checks,
+          naturalnessScore: p.naturalness,
+          naturalnessIn,
+          candidatesTried: candidates.length,
+          candidatesPassed: passed.length,
+          ...(stats ? { voiceMatch: true } : {}),
+        },
+      })),
+      winnerIndex: 0,
       status: 'Accepted',
     };
   }
@@ -974,6 +1181,9 @@ async function humanize(text, mode = 'Natural', intensity = 'Medium') {
     output: text,
     mode: safeMode,
     intensity: safeIntensity,
+    purpose: safePurpose,
+    depth: safeDepth,
+    voice: stats,
     engine,
     checks: {
       ...bestFailed.verdict.checks,
@@ -983,6 +1193,8 @@ async function humanize(text, mode = 'Natural', intensity = 'Medium') {
       candidatesPassed: 0,
       rejectedNaturalness: bestFailed.naturalness,
     },
+    candidates: [],
+    winnerIndex: -1,
     status: 'Returned original',
     rejectedOutput: bestFailed.candidate,
   };
@@ -993,12 +1205,16 @@ module.exports = {
   llmConfig,
   MODES,
   INTENSITIES,
+  PURPOSES,
+  PURPOSE_DEFAULTS,
+  DEPTHS,
   // exported for testing
   _internal: {
     protectEntities, restoreEntities, demoRewrite, meaningScore,
-    runChecks, verify, extractNegations, conceptSet, GATE,
+    runChecks, verify, verifyWithDepth, extractNegations, conceptSet, GATE,
     grammarFix, optimizeTransitions, reduceRepetition,
     fleschReadingEase, repetitionIndex,
     naturalnessScore, countAiMarkers,
+    purposeTuning, voiceStats, voiceBonus,
   },
 };

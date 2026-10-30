@@ -110,11 +110,71 @@ The ten techniques behind the pipeline, and where each one lives in
 | 7 | Grammar Correction | `grammarFix()` — doubled function words, "i"→"I", "a"→"an" before vowel sounds, missing space after punctuation, spacing/capitalisation via `tidy()`; runs while entities are placeholders, and also as a safety net on LLM output (the LLM prompt demands clean grammar too) |
 | 8 | Repetition Detection | `repetitionIndex()` reported in/out in every response, and `reduceRepetition()` which swaps the 3rd+ occurrence of a word for a safe alternative (2nd+ in strategy C) |
 | 9 | Readability Analysis | `fleschReadingEase()` — Flesch Reading Ease for input and output, reported as `readabilityIn` / `readabilityOut`. Report-only by design, never a rejection reason |
-| 10 | Style Transfer | The 5 **Modes** are the style transfer: Natural, Simple, Academic, Casual, Professional — `MODE_GUIDANCE` for the LLM, contraction/expansion voice rules in the demo engine |
+| 10 | Style Transfer | The 5 **Modes** are the style transfer: Natural, Simple, Academic, Casual, Professional — `MODE_GUIDANCE` for the LLM, contraction/expansion voice rules in the demo engine — plus the v3 **Purpose presets** (`purposeTuning()`), which restyle the same engine per job (Email, Marketing, Story…) |
+
+## v3 — premium-level features
+
+Version 3 takes the project to the level of the established commercial
+humanizers, feature by feature. The mapping below is grounded in a
+sourced comparison of the three products' **official** pages
+(30 Oct 2026) — only features a small independent project can honestly
+reproduce were copied; their proprietary models were not, and none of
+their marketing language was either.
+
+| v3 feature | Pattern it follows | How it is implemented here |
+|---|---|---|
+| **Purpose presets** — General, Essay, Assignment, Article, Email, Marketing, Story | DeepAI's per-purpose humanizing | A preset sets Mode + Intensity defaults **and** tunes the engine: Email splits sentences earlier (short, scannable) with contractions; Marketing splits hardest and rotates synonyms from the 2nd use (punchy); Story raises the split thresholds so long flowing sentences survive; Essay/Assignment lock contractions off (formal). The LLM prompt gets a matching purpose line. |
+| **Depth: Basic vs Advanced** | QuillBot's Basic vs Advanced split | Basic generates **one** candidate and verifies it **once** — the same six gate conditions, the same fail-safe, just faster. Advanced runs the full v2 loop: up to 3 candidates, **double** verification, naturalness competition. The response's `verificationRuns` (1 or 2) states honestly which path ran. |
+| **Custom Voice** | Grammarly's personal voice profile | An optional writing sample (≥ 40 words) is reduced to **style statistics only** — average sentence length, contraction tendency, average word length. The raw sample never enters the LLM prompt and is stored only in the browser's localStorage. The stats bias contraction behaviour and add a voice-match bonus (≤ +12) when the winning candidate is chosen — after the gate, never instead of it. |
+| **Compare rewrites** | QuillBot's Compare Modes | The API returns **every gate-passing candidate** with its own full checks (`candidates[]`, `winnerIndex`). The UI lists them under "Compare rewrites"; clicking one swaps the displayed output **and** its gate panel to that candidate's own checks. |
+| **Word-click synonym swap** | QuillBot's click-a-word synonyms | In the output, words present in the synonym map (either direction) carry a dotted underline. Clicking one offers the alternatives; choosing replaces **that occurrence only** and the edited text is **re-verified locally** (`verifyEdit()` in the browser port). If the edit breaks the gate, the panel switches to a clear warning — *"Edited — this version no longer passes all checks"* — and the edit is **kept**, never silently reverted. |
+| **Sentence stats rail** | Grammarly / QuillBot result statistics | The gate panel shows sentences in → out, average sentence length in → out, and a per-sentence length bar chart of the output, so the rhythm change is visible at a glance. |
+
+> **Honesty note (kept from the research):** QuillBot and Grammarly
+> themselves state on their official pages that their humanizers are
+> **not** tools for bypassing AI detectors, and neither claims a
+> guaranteed detector result. This project makes the same statement:
+> it makes writing genuinely more natural and proves the meaning
+> survived — it does **not** claim "undetectable" or any detector
+> score, anywhere.
+
+### Test battery (v3, demo engine — real measured results)
+
+The v3 engine was run over a battery of 13 paragraphs across every
+kind of text a student meets — academic/research, technical/software,
+casual blog, business email (Email preset), marketing copy (Marketing
+preset), a story opening (Story preset), a negation-heavy rules text,
+a numbers/dates/percentages report, a quote + acronym paragraph, a
+long ~250-word paragraph, and the three v2 regression cases
+(entity-heavy, the built-in sample, and a planted grammar-fault
+paragraph). Battery inputs were kept out of the repo; the measured
+results were:
+
+- **13 of 13 Accepted** — no case needed the fail-safe.
+- **Meaning score 91–99** on every case; **fact coverage 97–100%**;
+  **new-facts ratio 0–9%**; **negation lock passed on all 13**,
+  including the negation-heavy text (93 meaning, all negations intact).
+- **Naturalness rose sharply on robotic inputs**: academic 54 → 82,
+  marketing 56 → 82, the long paragraph 62 → 93, the grammar-fault
+  paragraph 49 → 91 (all planted faults fixed), the sample 56 → 88.
+- Disclosed as-is: on inputs that were **already** natural human text
+  (casual blog 96, story 85, negation rules 94) the delivered output
+  landed within a few points of the input's own naturalness
+  (95, 83, 90) — the meaning gate outranks naturalness, so a
+  meaning-perfect rewrite is never traded for a score.
+- The browser port was verified **identical** to the server on every
+  battery-adjacent parity case (default, Email preset, Basic depth,
+  Custom Voice, entity-heavy): same output, same checks.
 
 ## The API
 
-`POST /api/humanize` with `{ "text": "…", "mode": "Natural", "intensity": "Medium" }`:
+`POST /api/humanize` with `{ "text": "…", "mode": "Natural", "intensity": "Medium" }`.
+v3 adds three optional fields — `"purpose"` (one of `PURPOSES`,
+default `"General"`), `"depth"` (`"Basic"` or `"Advanced"`, default
+`"Advanced"`), and `"voiceSample"` (a writing sample; only its style
+statistics are used) — and the response gains `purpose`, `depth`,
+`voice` (the statistics or `null`), `candidates` (every gate-passing
+rewrite with its own checks) and `winnerIndex`:
 
 ```json
 {
@@ -185,15 +245,19 @@ long, unknown mode) come back as clean JSON messages.
 ## Live on GitHub Pages
 
 This site also runs as a **fully static build on GitHub Pages** — no
-server, no API key. The Pages build carries the **same v2 demo
+server, no API key. The Pages build carries the **same v3 demo
 algorithm in the browser**: `client/src/humanizerClient.js` is a
 browser port of the demo-engine pipeline in `server/humanizer.js`
-(PROTECT → 3 candidate rewrites → the six-check gate, double-verified
-→ naturalness loop → fail-safe). The app always tries the Express API
-first; when no API answers (as on Pages), it automatically falls back
-to the in-browser engine, and the header shows **Demo Mode**. The full
-server version additionally supports the **LLM engine** when an API
-key is configured — that is the only difference.
+(PROTECT → purpose-tuned candidate rewrites → the six-check gate →
+naturalness loop → fail-safe), regenerated from the server file by
+the documented port process so the two engines cannot drift apart —
+and it includes the v3 surface (purpose presets, depth, Custom
+Voice, compare candidates, the synonym swap's `verifyEdit()`). The
+app always tries the Express API first; when no API answers (as on
+Pages), it automatically falls back to the in-browser engine, and
+the header shows **Demo Mode**. The full server version additionally
+supports the **LLM engine** when an API key is configured — that is
+the only difference.
 
 ## Roadmap — Phase 3 (not in this MVP)
 

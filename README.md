@@ -284,25 +284,58 @@ reproduces the parts a small tool honestly can:
 **The heuristic (this is the honest part).** Turnitin's scores come
 from a proprietary transformer model trained on its in-house academic
 corpus; this demo has no such model. Each qualifying sentence gets a
-transparent 0–1 AI-pattern score from surface signals only —
-AI-marker/stock phrases (weight 0.45), a formulaic starter or a
-starter repeated from the previous sentence (0.20), sentence length
-close to the document mean with no "specifics" such as numbers,
-quotes, contractions or names (0.20), and low lexical variety inside
-the sentence (0.15) — and is flagged at **≥ 0.65**. The document
-score is the rounded percentage of flagged qualifying sentences.
-The analyzer is `analyzeText()` in `server/humanizer.js`, exposed as
-`POST /api/analyze`, and ported byte-identically to the browser
-(`analyzeLocal` in `client/src/humanizerClient.js`, parity-verified
-against the server on AI-style, human-style, flagged, mixed-prose
-and short inputs).
+transparent 0–1 AI-pattern score from surface signals only, and is
+flagged at **≥ 0.40**; the document score is the rounded percentage
+of flagged qualifying sentences. This is **Detector v2** (31 Oct
+2026). v1 weighted stock phrases so heavily (0.45, threshold 0.65)
+that a sentence containing no stock phrase could reach at most 0.55 —
+and modern LLM prose, which avoids the classic stock phrases, scored
+0% end-to-end (one simple human sentence, at 0.30, outscored every
+modern-AI sentence, max 0.20). v2 rebalances seven documented
+signals (weights sum to 1.00): AI-marker/stock phrases (0.26); a
+formulaic starter or a starter repeated from the previous sentence
+(0.08); sentence length close to the document mean with no
+"specifics" such as numbers, quotes, contractions or names (0.18);
+**burstiness** — a document-level signal, the coefficient of
+variation of sentence lengths (0.22); **word-rank predictability**
+in the GLTR style (0.10), from an embedded ~2,225-word Google Books
+frequency list (common-word density in the top 1,000 plus scarcity
+of words outside the list) — kept deliberately small, because simple
+non-native English also uses common words, which is the known GLTR
+false-positive trap; average word length (0.12); and cross-sentence
+bigram repetition (0.04). The v1 within-sentence lexical-variety
+signal was removed: measured on human and AI texts alike it is ~0
+everywhere (neither repeats words inside a sentence), so it carried
+no signal. The analyzer is `analyzeText()` in
+`server/humanizer.js`, exposed as `POST /api/analyze`, and ported
+byte-identically to the browser (`analyzeLocal` in
+`client/src/humanizerClient.js`, parity-verified JSON-deep-equal
+against the server on the whole validation battery below). A
+dependency-free Python 3 port of the same detector,
+`ai_detector.py`, is distributed with the project (outside the
+repo); its percentages and flagged lines match the JS implementation
+exactly on the battery texts.
 
-**Measured demo results (31 Oct 2026, the two built-in samples):**
-the deliberately robotic AI-style sample (326 words) scores **63%**
-with 10 of 16 sentences highlighted; the human-style sample (328
-words, varied, personal, contractions) scores **0%**; a planted
-zero-width character pair plus a Cyrillic homoglyph in the AI sample
-are both listed in the Flags panel.
+**Validation battery (31 Oct 2026, Detector v2; fictional texts
+written for testing, ≥ 300 words each):**
+
+| Text | v2 result | v1 result |
+| --- | --- | --- |
+| Classic AI-style sample (built-in demo, saturated with stock phrases) | **100%** (16/16 flagged) | 63% |
+| Modern AI-style sample (current ChatGPT-style prose, zero stock phrases) | **80%** (12/15 flagged) | 0% |
+| Formal academic AI-style text (no stock phrases) | **43%** (6/14 flagged) | 0% |
+| Human-style sample (built-in demo; personal, varied, contractions) | **0%** | 0% |
+| Formal human academic text (named researchers, exact figures, quotations) | **0%** | 0% |
+| Simple-English non-native-style human text (short sentences, common words — the known false-positive risk group) | **0%** | 0% |
+| The modern AI sample after this app's own humanizer | **0%** (down from 80%) | — |
+| Human sample with two classic-AI sentences mixed in | **\*%** band (number suppressed, as designed) | \*% |
+
+**Measured demo results (built-in samples):** the deliberately
+robotic AI-style sample (326 words) scores **100%** with all 16
+sentences highlighted; the human-style sample (328 words, varied,
+personal, contractions) scores **0%**; a planted zero-width character
+pair plus a Cyrillic homoglyph in the AI sample are both listed in
+the Flags panel.
 
 **Document upload (PDF / Word / TXT).** Above the paste box, the
 **📄 Upload a document** area takes the same files Turnitin accepts —
@@ -317,9 +350,13 @@ opened. Two extraction details matter: PDF text is rebuilt from item
 geometry (wrapped lines are re-joined with a space; only a line gap
 far larger than the page's typical gap counts as a paragraph break),
 so an uploaded document analyses **identically to the same text
-pasted in** — verified headlessly on 31 Oct 2026: the AI-style sample
-scores **63% with the same 10 flagged sentences** via paste, PDF, DOCX
-and TXT alike; the human-style sample scores **0%** via PDF. The
+pasted in** — verified headlessly on 31 Oct 2026 (Detector v2): the
+AI-style sample scores **100% with the same 16 flagged sentences**
+via paste and PDF alike (and via DOCX and TXT under v1); the
+human-style sample scores **0%** via PDF. One honest caveat: text
+that is part of the file itself — e.g. a browser print header with
+a date stamp saved into the PDF — is analysed as part of the
+document, exactly as a real detector would read the file. The
 report header carries the **document name** (and it prints, via
 Download / Print Report). Edge cases, all with honest messages and no
 fake report: a **scanned / image-only PDF** (no text layer) is
@@ -385,7 +422,7 @@ fail), and the flawed candidate under `"rejectedOutput"`.
 `POST /api/analyze` with `{ "text": "…" }` powers the Professor View
 (see its section above): it returns the report `state`
 (`scored` / `zero` / `low` / `tooShort` / `tooLong`), the
-`displayScore` (`"63%"` / `"0%"` / `"*%"` / `null`), per-segment
+`displayScore` (`"100%"` / `"0%"` / `"*%"` / `null`), per-segment
 sentences with flags (suppressed in the `low` state), document
 `details`, and integrity `flags`. Short or over-long texts return a
 report state rather than an error, mirroring Turnitin's indicators.

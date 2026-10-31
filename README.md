@@ -252,27 +252,42 @@ reproduces the parts a small tool honestly can:
   in long-form writing only. List items, ALL-CAPS short headings and
   quoted blocks are segmented out and never counted, and the report
   says the percentage is not a percentage of the whole document.
-- **Display states, exactly as Turnitin's post-July-2024 rules:**
-  `0%` shows "0%" with no highlights; **1–19% shows only `*%`** — no
-  number and no highlights anywhere in the report, because false
-  positives are more likely in that band (the suppression happens in
-  the analyzer itself: the payload for that state contains no number
-  and no flags to leak); **20–100%** shows the number with flagged
-  sentences highlighted **blue**.
+- **Display states, following Turnitin's post-July-2024 rules with a
+  Detector v2.1 audit correction:** a true zero-flag result shows
+  `0%`; a **raw 1–19% share uses only a `*%` headline** and no
+  sentence highlights, because false positives are more likely in
+  that band (sentence-level flags and scores are stripped by the
+  analyzer itself); **raw 20–100%** shows the rounded number with
+  flagged sentences highlighted **blue**. The state is decided from
+  the flagged count and the *raw* share, never from the rounded
+  integer: v2 could round 4 flags in 1,066 sentences down to a false
+  `0%`. Document Details therefore always carries the true flagged
+  count and one-decimal exact share (`percentExact`) for audit.
 - **Intake gates:** under 300 words of prose → no report (the `- -`
   state with the reason, mirroring Turnitin's 300-word minimum);
   a 30,000-word ceiling is enforced and stated.
 - **Submission Breakdown bar:** one segment per qualifying sentence,
   sized by sentence length, blue for flagged; clicking a segment
-  scrolls to that sentence and flashes it.
+  scrolls to that sentence and flashes it. Above 120 sentences the
+  bar aggregates the document into exactly **100 bins** (a bin is
+  blue when it contains a flagged sentence and its tooltip gives the
+  bin's share), so a 1,000+ sentence report cannot overflow its card.
+- **Most AI-pattern sections (long documents):** at 60 or more
+  qualifying sentences the analyzer returns consecutive ~25-sentence
+  sections. The report lists the five sections with the highest
+  flagged share; in the numeric state, clicking one jumps to its
+  first sentence. In the `*%` state the section links are disabled,
+  keeping sentence-level suppression consistent.
 - **Integrity Flags panel:** hidden characters (U+200B, U+200C,
   U+200D, U+FEFF) and replaced characters (Cyrillic/Greek lookalikes
   inside Latin words) are genuinely detected and located, with
   Turnitin's wording that "a flag is not necessarily an indicator of
   a problem".
 - **Document Details:** total words, qualifying sentences, excluded
-  non-prose segments, average sentence length, flagged count (≥20%
-  state only) and a US/UK spelling-mix count.
+  non-prose segments (including separate short-fragment and
+  table-of-contents counts), average sentence length on the cleaned
+  qualifying set, the true flagged count with the exact one-decimal
+  share in every scored state, and a US/UK spelling-mix count.
 - **Download / Print Report** produces a clean printout in the shape
   of Turnitin's PDF: cover header (title, date) → score overview →
   breakdown → the highlighted submission → details → honesty note.
@@ -285,9 +300,11 @@ reproduces the parts a small tool honestly can:
 from a proprietary transformer model trained on its in-house academic
 corpus; this demo has no such model. Each qualifying sentence gets a
 transparent 0–1 AI-pattern score from surface signals only, and is
-flagged at **≥ 0.40**; the document score is the rounded percentage
-of flagged qualifying sentences. This is **Detector v2** (31 Oct
-2026). v1 weighted stock phrases so heavily (0.45, threshold 0.65)
+flagged at **≥ 0.40**; the display state is decided from the flagged
+count and the raw percentage of flagged qualifying sentences. This
+is **Detector v2.1** (31 Oct 2026), retaining Detector v2's signals
+and adding the long-document corrections documented below. v1
+weighted stock phrases so heavily (0.45, threshold 0.65)
 that a sentence containing no stock phrase could reach at most 0.55 —
 and modern LLM prose, which avoids the classic stock phrases, scored
 0% end-to-end (one simple human sentence, at 0.30, outscored every
@@ -306,29 +323,65 @@ false-positive trap; average word length (0.12); and cross-sentence
 bigram repetition (0.04). The v1 within-sentence lexical-variety
 signal was removed: measured on human and AI texts alike it is ~0
 everywhere (neither repeats words inside a sentence), so it carried
-no signal. The analyzer is `analyzeText()` in
+no signal.
+
+**Detector v2.1 long-document corrections.** Before scoring, the
+qualifying set is cleaned: sentence fragments of **three words or
+fewer** are excluded as fragments, and contents-style lines are
+excluded separately (lines with a tab or dotted leaders ending in a
+page number, chapter/section listings ending in a page number, and
+short unpunctuated lines ending in a page number). The existing
+list, heading and quoted-block exclusions remain. Both new counts
+are reported in Document Details. Sentence-length **CV/burstiness
+is computed on sentences of at least five words only**, so very
+short debris cannot set the document rhythm; average sentence
+length is recomputed on the cleaned qualifying set. At 60 or more
+cleaned sentences, the analyzer also returns the section windows
+described above. The analyzer is `analyzeText()` in
 `server/humanizer.js`, exposed as `POST /api/analyze`, and ported
 byte-identically to the browser (`analyzeLocal` in
 `client/src/humanizerClient.js`, parity-verified JSON-deep-equal
-against the server on the whole validation battery below). A
-dependency-free Python 3 port of the same detector,
-`ai_detector.py`, is distributed with the project (outside the
-repo); its percentages and flagged lines match the JS implementation
-exactly on the battery texts.
+against the server on the whole validation battery below and on
+the FYP report). A dependency-free Python 3 port of the same
+Detector v2.1, `ai_detector.py`, is distributed with the project
+(outside the repo); its headline states, exact percentages, flagged
+counts and section summaries match the JS implementation on the
+battery texts and on the FYP report.
 
-**Validation battery (31 Oct 2026, Detector v2; fictional texts
+**Validation battery (31 Oct 2026, Detector v2.1; fictional texts
 written for testing, ≥ 300 words each):**
 
-| Text | v2 result | v1 result |
-| --- | --- | --- |
-| Classic AI-style sample (built-in demo, saturated with stock phrases) | **100%** (16/16 flagged) | 63% |
-| Modern AI-style sample (current ChatGPT-style prose, zero stock phrases) | **80%** (12/15 flagged) | 0% |
-| Formal academic AI-style text (no stock phrases) | **43%** (6/14 flagged) | 0% |
-| Human-style sample (built-in demo; personal, varied, contractions) | **0%** | 0% |
-| Formal human academic text (named researchers, exact figures, quotations) | **0%** | 0% |
-| Simple-English non-native-style human text (short sentences, common words — the known false-positive risk group) | **0%** | 0% |
-| The modern AI sample after this app's own humanizer | **0%** (down from 80%) | — |
-| Human sample with two classic-AI sentences mixed in | **\*%** band (number suppressed, as designed) | \*% |
+| Text | v2.1 result | v2 result | v1 result |
+| --- | --- | --- | --- |
+| Classic AI-style sample (built-in demo, saturated with stock phrases) | **100%** (16/16 flagged) | 100% | 63% |
+| Modern AI-style sample (current ChatGPT-style prose, zero stock phrases) | **80%** (12/15 flagged) | 80% | 0% |
+| Formal academic AI-style text (no stock phrases) | **43%** (6/14 flagged; 42.9% exact) | 43% | 0% |
+| Human-style sample (built-in demo; personal, varied, contractions) | **0%** (0/16 cleaned sentences; 3 fragments excluded) | 0% (0/19 uncleaned) | 0% |
+| Formal human academic text (named researchers, exact figures, quotations) | **0%** (0/19 flagged) | 0% | 0% |
+| Simple-English non-native-style human text (short sentences, common words — the known false-positive risk group) | **0%** (0/33 flagged) | 0% | 0% |
+| The modern AI sample after this app's own humanizer | **0%** (down from 80%) | 0% | — |
+| Human sample with two classic-AI sentences mixed in | **\*%** band (2/18 cleaned sentences; 11.1% exact in details) | \*% (21 uncleaned sentences) | \*% |
+
+No battery case changed band under v2.1: every AI case remains in
+the numeric band, every human case remains at a true zero, the
+non-native safety case remains at zero, and the mixed case remains
+in the low band.
+
+**Real-world long-document case — the author's FYP report**
+(`fyp_final_report.docx`, 10,568 words, analysed from mammoth's raw
+text extraction and again end-to-end through the staging upload):
+Detector v2 reported a rounded `0%` even though 4 sentences were
+flagged. Detector v2.1 reports **`*%`**, with **9 of 573 cleaned
+qualifying sentences flagged (1.6% exact)**. Hygiene excluded 437
+short fragments and 30 contents lines, alongside the pre-existing
+non-prose exclusions (521 excluded segments in total); the cleaned
+average sentence length is 16.9 words and the ≥5-word sentence-length
+CV is 0.40. Its 23 section windows are uneven rather than a single
+cluster: the highest is sentences **76–100 at 8% (2/25 flagged)**;
+seven further sections contain one flagged sentence each. This is a
+worked example of the honest limit below: on a long mixed report,
+a whole-document share can be small even when individual formulaic
+passages cross the sentence threshold.
 
 **Measured demo results (built-in samples):** the deliberately
 robotic AI-style sample (326 words) scores **100%** with all 16
@@ -353,7 +406,10 @@ so an uploaded document analyses **identically to the same text
 pasted in** — verified headlessly on 31 Oct 2026 (Detector v2): the
 AI-style sample scores **100% with the same 16 flagged sentences**
 via paste and PDF alike (and via DOCX and TXT under v1); the
-human-style sample scores **0%** via PDF. One honest caveat: text
+human-style sample scores **0%** via PDF. Under Detector v2.1, the
+actual FYP DOCX was also uploaded end-to-end through the staging
+build and reproduced the server/Python result exactly (`*%`, 9/573
+flagged, 1.6% exact, 100 breakdown bins fitting the card). One honest caveat: text
 that is part of the file itself — e.g. a browser print header with
 a date stamp saved into the PDF — is analysed as part of the
 document, exactly as a real detector would read the file. The
@@ -423,9 +479,12 @@ fail), and the flawed candidate under `"rejectedOutput"`.
 (see its section above): it returns the report `state`
 (`scored` / `zero` / `low` / `tooShort` / `tooLong`), the
 `displayScore` (`"100%"` / `"0%"` / `"*%"` / `null`), per-segment
-sentences with flags (suppressed in the `low` state), document
-`details`, and integrity `flags`. Short or over-long texts return a
-report state rather than an error, mirroring Turnitin's indicators.
+sentences with flags (sentence-level flags/scores suppressed in the
+`low` state), document `details` (including the true
+`flaggedCount`, one-decimal `percentExact`, and the fragment/TOC
+exclusion counts), `sections` for long documents, and integrity
+`flags`. Short or over-long texts return a report state rather than
+an error, mirroring Turnitin's indicators.
 
 **Demo mode** is the default: no API key is needed and everything works
 offline. To use a real LLM, copy `server/.env.example` values into your

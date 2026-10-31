@@ -474,7 +474,19 @@ textarea:focus { outline: 2px solid #5b5bd6; outline-offset: 1px; }
 }
 .prof-seg:hover { outline: 2px solid #2456a6; outline-offset: 1px; }
 .prof-seg.flagged { background: #2f6fd0; }
+.prof-bar.binned { gap: 1px; width: 100%; overflow: hidden; }
+.prof-seg.binned { flex: 1 1 0; min-width: 0; }
 .prof-legend { color: #667; font-size: 13px; margin-bottom: 0; }
+.prof-section-list { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 10px; }
+.prof-section-item {
+  width: 100%; box-sizing: border-box; display: flex; flex-direction: column;
+  gap: 3px; text-align: left; padding: 10px 12px; border: 1px solid #d7dee9;
+  border-radius: 8px; background: #f7f9fc; color: inherit; font: inherit;
+}
+button.prof-section-item { cursor: pointer; }
+button.prof-section-item:hover { border-color: #2456a6; background: #e8f0fe; }
+.prof-section-meta { font-weight: 800; color: #2456a6; }
+.prof-section-label { line-height: 1.45; }
 .prof-cols { display: grid; grid-template-columns: 1.6fr 1fr; gap: 18px; align-items: start; }
 .prof-side { display: flex; flex-direction: column; gap: 18px; }
 .prof-doc { line-height: 1.75; white-space: normal; }

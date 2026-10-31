@@ -172,10 +172,11 @@ function matchCase(original, replacement) {
 /* published report design (researched from Turnitin's official       */
 /* guides, 31 Oct 2026): the score is the share of QUALIFYING         */
 /* sentences (prose only — lists, headings and quoted blocks are      */
-/* excluded) over a per-sentence threshold; 0% shows as 0%, scores     */
-/* of 20% and above show the number with blue sentence highlights,    */
-/* and 1–19% shows ONLY "*%" — no number, no highlights — because      */
-/* false positives are more likely in that band. The analysis itself  */
+/* excluded) over a per-sentence threshold; a true zero shows as 0%,   */
+/* scores of 20% and above show the number with blue highlights, and  */
+/* the raw 1–19% band uses a "*%" headline with no sentence           */
+/* highlights because false positives are more likely there. The      */
+/* analysis itself  */
 /* is a transparent heuristic (see analyzeText in humanizerClient.js) */
 /* — NOT Turnitin's proprietary model, and the honesty block below    */
 /* says so, always.                                                   */
@@ -197,9 +198,10 @@ function ProfessorHonesty() {
         misidentify human-written, AI-generated and AI-paraphrased text, so it must{' '}
         <strong>never be used as the sole basis for adverse action against a student</strong>.
         It takes further scrutiny and human judgement, together with your institution&apos;s
-        academic policies, to decide whether anything is wrong at all. Low scores are shown
-        as <strong>*%</strong> — with no number and no highlights — precisely because false
-        positives are more likely in that range.
+        academic policies, to decide whether anything is wrong at all. Low scores use a
+        <strong>*%</strong> headline and no sentence highlights — precisely because false
+        positives are more likely in that range. The exact aggregate count stays in
+        Document Details so a real flag on a long document cannot be rounded away to 0%.
       </p>
     </section>
   );
@@ -425,6 +427,38 @@ function ProfessorView() {
   const proseSentences = report ? report.sentences.filter((s) => s.kind === 'prose') : [];
   const showBar = report && report.state !== 'tooShort' && report.state !== 'tooLong';
   const sp = report ? report.details.spelling : { us: 0, uk: 0 };
+  const topSections = report && Array.isArray(report.sections)
+    ? report.sections
+      .filter((section) => section.flaggedCount > 0)
+      .slice()
+      .sort((a, b) => (b.percentRaw - a.percentRaw)
+        || (b.flaggedCount - a.flaggedCount) || (a.index - b.index))
+      .slice(0, 5)
+    : [];
+  const barBins = proseSentences.length > 120
+    ? Array.from({ length: 100 }, (_, i) => {
+      const start = Math.floor((i * proseSentences.length) / 100);
+      const end = Math.floor(((i + 1) * proseSentences.length) / 100);
+      const group = proseSentences.slice(start, end);
+      const flaggedCount = group.filter((s) => s.flagged).length;
+      return {
+        index: i,
+        start,
+        end: end - 1,
+        group,
+        flaggedCount,
+        percentExact: group.length
+          ? Math.round(((100 * flaggedCount) / group.length) * 10) / 10 : 0,
+        first: group[0],
+      };
+    })
+    : null;
+
+  function jumpToSection(section) {
+    if (!report || report.state !== 'scored') return;
+    const target = proseSentences[section.sentenceStart];
+    if (target) jumpToSentence(target.index);
+  }
 
   return (
     <div className="prof">
@@ -436,8 +470,9 @@ function ProfessorView() {
           <strong>qualifying sentences</strong> (prose only — list items, headings and quoted
           blocks are excluded, just as Turnitin excludes non-prose) show AI-like patterns.
           A report needs <strong>at least 300 words</strong> of prose; the ceiling is 30,000
-          words. Scores under the display threshold are shown as <strong>*%</strong> with no
-          number and no highlights, because false positives are more likely there.
+          words. Scores under the display threshold use a <strong>*%</strong> headline
+          and no sentence highlights, because false positives are more likely there;
+          the exact aggregate count is kept in Document Details for audit.
         </p>
       </section>
 
@@ -575,23 +610,92 @@ function ProfessorView() {
           {showBar && (
             <section className="panel prof-breakdown">
               <h3>Submission Breakdown</h3>
-              <div className="prof-bar" role="group" aria-label="Submission breakdown bar">
-                {proseSentences.map((s) => (
-                  <button
-                    key={s.index}
-                    type="button"
-                    className={`prof-seg${s.flagged ? ' flagged' : ''}`}
-                    style={{ flexGrow: Math.max(1, countWords(s.text)) }}
-                    title={`Sentence ${s.index + 1}${s.flagged ? ' — flagged as AI-pattern' : ''}`}
-                    onClick={() => jumpToSentence(s.index)}
-                  />
-                ))}
-              </div>
+              {barBins ? (
+                <>
+                  <div className="prof-bar binned" role="group" aria-label="Submission breakdown bar, grouped into 100 bins">
+                    {barBins.map((bin) => (
+                      <button
+                        key={bin.index}
+                        type="button"
+                        className={`prof-seg binned${bin.flaggedCount ? ' flagged' : ''}`}
+                        title={`Sentences ${bin.start + 1}–${bin.end + 1} — ${bin.flaggedCount} flagged (${bin.percentExact}%)`}
+                        onClick={() => bin.first && jumpToSentence(bin.first.index)}
+                      />
+                    ))}
+                  </div>
+                  <p className="prof-legend">
+                    Long document grouped into 100 bins; each bin covers about{' '}
+                    {Math.ceil(proseSentences.length / 100)} qualifying sentences.{' '}
+                    {report.state === 'scored'
+                      ? 'Blue = the bin contains at least one flagged sentence. Click a bin to jump to its first sentence.'
+                      : 'No sentence is highlighted in this score range. Click a bin to jump to its first sentence.'}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="prof-bar" role="group" aria-label="Submission breakdown bar">
+                    {proseSentences.map((s) => (
+                      <button
+                        key={s.index}
+                        type="button"
+                        className={`prof-seg${s.flagged ? ' flagged' : ''}`}
+                        style={{ flexGrow: Math.max(1, countWords(s.text)) }}
+                        title={`Sentence ${s.index + 1}${s.flagged ? ' — flagged as AI-pattern' : ''}`}
+                        onClick={() => jumpToSentence(s.index)}
+                      />
+                    ))}
+                  </div>
+                  <p className="prof-legend">
+                    One segment per qualifying sentence, sized by its length.{' '}
+                    {report.state === 'scored'
+                      ? 'Blue = flagged as AI-pattern. Click a segment to jump to that sentence.'
+                      : 'No sentence is highlighted in this score range. Click a segment to jump to that sentence.'}
+                  </p>
+                </>
+              )}
+            </section>
+          )}
+
+          {report.sections && report.sections.length > 0 && (
+            <section className="panel prof-sections">
+              <h3>Most AI-pattern sections</h3>
+              {topSections.length ? (
+                <ol className="prof-section-list">
+                  {topSections.map((section) => {
+                    const content = (
+                      <>
+                        <span className="prof-section-meta">
+                          Sentences {section.sentenceStart + 1}–{section.sentenceEnd + 1}
+                          {' · '}{section.percentRaw}% · {section.flaggedCount} of {section.sentenceCount} flagged
+                        </span>
+                        <span className="prof-section-label">{section.label}</span>
+                      </>
+                    );
+                    return (
+                      <li key={section.index}>
+                        {report.state === 'scored' ? (
+                          <button
+                            type="button"
+                            className="prof-section-item"
+                            onClick={() => jumpToSection(section)}
+                            title="Jump to this section"
+                          >
+                            {content}
+                          </button>
+                        ) : (
+                          <div className="prof-section-item static">{content}</div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ol>
+              ) : (
+                <p>No section contains a flagged sentence.</p>
+              )}
               <p className="prof-legend">
-                One segment per qualifying sentence, sized by its length.{' '}
-                {report.state === 'scored'
-                  ? 'Blue = flagged as AI-pattern. Click a segment to jump to that sentence.'
-                  : 'No sentence is highlighted in this score range. Click a segment to jump to that sentence.'}
+                Sections are consecutive windows of about 25 qualifying sentences.
+                {report.state !== 'scored'
+                  && ' Section links are disabled in this score range, so no sentence is singled out.'}
               </p>
             </section>
           )}
@@ -684,15 +788,23 @@ function ProfessorView() {
                     <dd>{report.counts.excludedSegments}</dd>
                   </div>
                   <div>
+                    <dt>Short fragments excluded</dt>
+                    <dd>{report.details.excludedFragments ?? 0}</dd>
+                  </div>
+                  <div>
+                    <dt>Contents lines excluded</dt>
+                    <dd>{report.details.excludedToc ?? 0}</dd>
+                  </div>
+                  <div>
                     <dt>Average sentence length</dt>
                     <dd>{report.details.avgSentenceLength} words</dd>
                   </div>
                   <div>
                     <dt>Flagged sentences</dt>
                     <dd>
-                      {report.state === 'scored' || report.state === 'zero'
-                        ? report.details.flaggedCount
-                        : '— (not shown in this score range)'}
+                      {report.details.flaggedCount == null
+                        ? '—'
+                        : `${report.details.flaggedCount} (${report.details.percentExact}% exact)`}
                     </dd>
                   </div>
                   <div>

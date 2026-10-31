@@ -1310,10 +1310,12 @@ function synonymAlternatives(word) {
 /* lists, headings and quoted blocks are excluded) whose per-sentence  */
 /* AI-pattern score crosses a threshold. Display states mirror         */
 /* Turnitin's post-July-2024 rules exactly:                            */
-/*   0%        -> "0%", no highlights                                  */
-/*   1–19%     -> "*%" ONLY — no number and no highlights anywhere,    */
-/*                because false positives are more likely in that band */
-/*   20–100%   -> numeric %, flagged sentences highlighted blue        */
+/*   0 flags   -> "0%", no highlights                                  */
+/*   raw 1–19% -> "*%" headline and no sentence highlights, because    */
+/*                false positives are more likely in that band; v2.1   */
+/*                keeps the true aggregate count/exact share in the    */
+/*                details so integer rounding cannot erase real flags */
+/*   raw 20%+  -> numeric %, flagged sentences highlighted blue        */
 /* Intake mirrors Turnitin's file rules: at least 300 words of prose   */
 /* for a report at all, and a 30,000-word ceiling.                     */
 /*                                                                     */
@@ -1597,6 +1599,22 @@ function anWordCount(s) {
  * QUALIFYING text) plus excluded non-prose lines (list items, ALL-CAPS
  * short headings, quoted blocks), each with its character offset in the
  * original text so integrity flags can be located. */
+function anIsTocLine(line, trimmed) {
+  const words = anWordCount(trimmed);
+  if (words > 20) return false;
+  if (/\t/.test(line) && /\d+\s*$/.test(trimmed)) return true;
+  if (/(?:\.\s*){3,}\d+\s*$/.test(trimmed) || /…\s*\d+\s*$/.test(trimmed)) return true;
+  if (/^(?:chapter|section|appendix|part)\s+(?:\d+|[ivxlcdm]+)\b[^.!?]*\s\d+\s*$/i.test(trimmed)) return true;
+  // Contents entries are short, unpunctuated lines ending in a page
+  // number. Requiring no sentence punctuation keeps ordinary prose
+  // (including a sentence that happens to end in a year) out of this
+  // category when it is written as a normal punctuated sentence.
+  return words >= 2 && words <= 15
+    && !/[.!?]/.test(trimmed)
+    && /(?:^|\s)\d{1,4}\s*$/.test(trimmed)
+    && /[A-Za-z]/.test(trimmed);
+}
+
 function anSegments(text) {
   const segments = [];
   const lines = text.split('\n');
@@ -1614,10 +1632,11 @@ function anSegments(text) {
       || (/^\s*["“]/.test(line) && /["”]\s*$/.test(line));
     const isHeading = wordLike.length > 0 && wordLike.length <= 10
       && !/[a-z]/.test(trimmed) && /[A-Z]/.test(trimmed);
-    if (isList || isQuoteBlock || isHeading) {
+    const isToc = !isList && !isQuoteBlock && !isHeading && anIsTocLine(line, trimmed);
+    if (isList || isQuoteBlock || isHeading || isToc) {
       fromThisLine.push({
         kind: 'excluded',
-        sub: isList ? 'list item' : isQuoteBlock ? 'quoted block' : 'heading',
+        sub: isList ? 'list item' : isQuoteBlock ? 'quoted block' : isToc ? 'table of contents' : 'heading',
         text: trimmed,
         start: lineStart + line.indexOf(trimmed),
         flagged: false, score: null,
@@ -1630,8 +1649,10 @@ function anSegments(text) {
         const t = raw.trim();
         if (!/[A-Za-z0-9]/.test(t)) continue;
         const lead = raw.length - raw.trimStart().length;
+        const isFragment = anWordCount(t) <= 3;
         fromThisLine.push({
-          kind: 'prose', sub: 'sentence', text: t,
+          kind: isFragment ? 'excluded' : 'prose',
+          sub: isFragment ? 'fragment' : 'sentence', text: t,
           start: lineStart + m.index + lead,
           flagged: false, score: null,
         });
@@ -1655,9 +1676,16 @@ function anDocProfile(prose) {
     (s) => (s.text.toLowerCase().match(/[a-z][a-z'-]*/g) || []).length,
   );
   const mean = lens.length ? lens.reduce((a, b) => a + b, 0) / lens.length : 0;
-  const sd = lens.length
-    ? Math.sqrt(lens.reduce((a, b) => a + (b - mean) ** 2, 0) / lens.length) : 0;
-  const cv = mean ? sd / mean : 0;
+  // Detector v2.1: rhythm is measured on substantive sentences only.
+  // Four-word sentences remain in the qualifying set, but allowing
+  // very short lines to dominate the variance would make burstiness
+  // measure document debris rather than prose rhythm.
+  const rhythmLens = lens.filter((n) => n >= 5);
+  const rhythmMean = rhythmLens.length
+    ? rhythmLens.reduce((a, b) => a + b, 0) / rhythmLens.length : 0;
+  const rhythmSd = rhythmLens.length
+    ? Math.sqrt(rhythmLens.reduce((a, b) => a + (b - rhythmMean) ** 2, 0) / rhythmLens.length) : 0;
+  const cv = rhythmMean ? rhythmSd / rhythmMean : 0;
   const bigramDocs = new Map();
   const sentBigrams = prose.map((s) => {
     const w = s.text.toLowerCase().match(/[a-z][a-z'-]*/g) || [];
@@ -1673,6 +1701,32 @@ function anDocProfile(prose) {
     bigramDocs,
     sentBigrams,
   };
+}
+
+/* Long-document lens for Detector v2.1: consecutive windows of about
+ * 25 cleaned qualifying sentences. Indexes are positions in the
+ * cleaned prose array (not offsets in the raw segment list). */
+function anBuildSections(prose) {
+  if (prose.length < 60) return [];
+  const sections = [];
+  for (let start = 0; start < prose.length; start += 25) {
+    const window = prose.slice(start, start + 25);
+    const flaggedCount = window.filter((s) => s.flagged).length;
+    const percentExact = window.length
+      ? Math.round(((100 * flaggedCount) / window.length) * 10) / 10 : 0;
+    sections.push({
+      index: sections.length,
+      sentenceStart: start,
+      sentenceEnd: start + window.length - 1,
+      sentenceRange: [start, start + window.length - 1],
+      sentenceCount: window.length,
+      flaggedCount,
+      percentRaw: percentExact,
+      percentExact,
+      label: window.length ? window[0].text : '',
+    });
+  }
+  return sections;
 }
 
 function anSentenceScore(sentence, prevStarter, profile, sentIndex) {
@@ -1833,11 +1887,15 @@ function analyzeText(text) {
       excludedSegments: segments.length - prose.length,
     },
     sentences: segments,
+    sections: [],
     details: {
       avgSentenceLength: prose.length
         ? Math.round((qualifyingWords / prose.length) * 10) / 10 : 0,
       sentenceLengthCv: Math.round(anDocProfile(prose).cv * 100) / 100,
       flaggedCount: null,
+      percentExact: null,
+      excludedFragments: segments.filter((s) => s.sub === 'fragment').length,
+      excludedToc: segments.filter((s) => s.sub === 'table of contents').length,
       spelling: anSpelling(raw),
     },
     flags,
@@ -1865,29 +1923,36 @@ function analyzeText(text) {
     prevStarter = w ? w[0] : '';
   });
   const flaggedCount = prose.filter((s) => s.flagged).length;
-  const percent = Math.round((100 * flaggedCount) / prose.length);
+  const percentRaw = prose.length ? (100 * flaggedCount) / prose.length : 0;
+  const percentExact = Math.round(percentRaw * 10) / 10;
+  const percent = Math.round(percentRaw);
+  const sections = anBuildSections(prose);
+  const details = { ...base.details, flaggedCount, percentExact };
 
-  if (percent === 0) {
+  if (flaggedCount === 0) {
     return {
-      ...base, state: 'zero', displayScore: '0%', percent: 0,
-      details: { ...base.details, flaggedCount: 0 },
+      ...base, sections, state: 'zero', displayScore: '0%', percent: 0, percentExact,
+      details,
       interpretation: 'No AI-pattern sentences found in the qualifying text.',
     };
   }
-  if (percent < 20) {
-    // Turnitin's suppression rule, applied at the source: in the 1–19%
-    // band NO number and NO highlights are attributed, because false
-    // positives are more likely there. Flag/score data is stripped from
-    // the payload itself, so the UI cannot leak it.
+  if (percentRaw < 20) {
+    // Turnitin-style display suppression in the low band: the headline
+    // is *% and sentence-level flags/scores are stripped from the
+    // payload, so no sentence is highlighted or singled out. Detector
+    // v2.1 keeps the aggregate audit numbers in details/sections —
+    // the earlier integer-rounding rule could otherwise erase a real
+    // flagged sentence on a long document and report a false "0".
     for (const s of prose) { s.flagged = false; s.score = null; }
     return {
-      ...base, state: 'low', displayScore: '*%', percent: null,
-      interpretation: 'A small share of qualifying sentences showed AI-like patterns. The score is shown as *% with no number and no highlights, because false positives are more likely in this range — treat it only as a prompt for a closer look, not as a finding.',
+      ...base, sections, state: 'low', displayScore: '*%', percent: null, percentExact,
+      details,
+      interpretation: 'A small share of qualifying sentences showed AI-like patterns. The headline score is shown as *% with no sentence highlights, because false positives are more likely in this range — treat it only as a prompt for a closer look, not as a finding.',
     };
   }
   return {
-    ...base, state: 'scored', displayScore: `${percent}%`, percent,
-    details: { ...base.details, flaggedCount },
+    ...base, sections, state: 'scored', displayScore: `${percent}%`, percent, percentExact,
+    details,
     interpretation: `${percent}% of the qualifying sentences crossed the AI-pattern threshold — the highlighted sentences are the ones to review first.`,
   };
 }

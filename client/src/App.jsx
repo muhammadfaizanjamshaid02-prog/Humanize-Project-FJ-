@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import {
-  humanizeLocal, verifyEdit, synonymAlternatives,
+  humanizeLocal, verifyEdit, synonymAlternatives, analyzeLocal,
   PURPOSES, PURPOSE_DEFAULTS, DEPTHS,
 } from './humanizerClient.js';
 import { AVATAR_DATA_URI } from './avatarData.js';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
 /* ------------------------------------------------------------------ */
 /* Login gate (personal/show gate for the demo — NOT real security).  */
@@ -103,6 +104,20 @@ function countWords(text) {
   return text.trim() ? text.trim().split(/\s+/).length : 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Professor View demo texts — FICTIONAL samples, written for this    */
+/* demo. The AI-style one is deliberately robotic (stock phrases,     */
+/* stock openers, near-identical sentence lengths); the human-style   */
+/* one is a personal anecdote with varied lengths, contractions and   */
+/* specific details. Both are over 300 words so they produce a full   */
+/* report instead of the too-short state.                             */
+/* ------------------------------------------------------------------ */
+const PROF_AI_SAMPLE =
+  'Furthermore, it is important to note that technology plays a crucial role in the modern world of education today. Moreover, in today\'s fast-paced world, students can access a wide range of resources in an efficient and effective manner. Additionally, online learning platforms provide students with the opportunity to learn at their own pace and in their own time. In addition, teachers can utilize various digital tools in order to enhance the overall learning experience for their students. It is worth mentioning that communication has become significantly easier due to the rapid advancement of modern technology in recent years. Consequently, students are able to collaborate with their classmates and share their ideas in a more effective way than before. Furthermore, technology has the potential to make education more accessible for students who live in remote and rural areas. In conclusion, it can be clearly seen that technology plays a vital role in shaping the future of modern education. Moreover, the use of technology in the classroom can significantly improve the overall quality of teaching and learning for everyone. Additionally, it is important to note that digital resources are constantly evolving in the ever-evolving landscape of modern education. When it comes to examinations, technology provides a wide range of tools that can help students prepare in an effective manner. Therefore, schools should embrace technology and integrate it into their daily teaching practices in order to achieve better outcomes for students. Furthermore, parents can monitor the progress of their children through various online platforms and applications in a convenient and timely manner. In addition, the availability of online courses means that students can pursue their interests beyond the boundaries of the traditional classroom setting. Overall, technology continues to transform the field of education in numerous ways and it will continue to do so in the future. To sum up, it is clear that the benefits of technology in education are numerous and its importance cannot be ignored or denied.';
+
+const PROF_HUMAN_SAMPLE =
+  'My grandfather kept a small notebook in his shirt pocket for almost forty years, and he wrote everything in it with a stub of pencil. Train times. Prices of onions. The name of a man who owed him two hundred rupees in 1987 and never paid. When he died last spring, the notebook came to me in a biscuit tin, along with his watch and an old photograph. I did not open it for weeks. It sat on my desk while I revised for my finals, and some nights in Lahore I would read one page instead of sleeping. What surprised me most was how ordinary the entries were. He had recorded the day the electricity meter was installed and the winter my aunt was born. Once, between a list of seed prices and a note about repairing the roof, he had written a single line about my grandmother: "She laughed today at breakfast. A good day." That line undid me, honestly. I keep thinking about why it hit so hard, and I suppose it is because the rest of us store our lives in photographs that vanish when a phone breaks, while he trusted paper and a short pencil. So I have started keeping a notebook of my own, which feels slightly ridiculous for a software student, and my handwriting is terrible besides. Still, I write in it most evenings — what I studied, what confused me, which bug took three hours to find. Some entries are one line long. Others run for a page and end mid-thought, because the power went out or someone called me downstairs for chai. What matters, I think, is the habit of noticing: the way my mother tests mangoes at the stall, the exact green of the fields after the first rain in July. My grandfather noticed things for forty years with a pencil stub, and because he did, a whole vanished world fits inside a biscuit tin on my desk.';
+
 function loadHistory() {
   try {
     return JSON.parse(localStorage.getItem(HISTORY_KEY)) || [];
@@ -151,7 +166,564 @@ function matchCase(original, replacement) {
   return replacement;
 }
 
+/* ------------------------------------------------------------------ */
+/* Professor View — a Turnitin-STYLE instructor AI-writing report.    */
+/* The layout, display states and wording follow Turnitin's own       */
+/* published report design (researched from Turnitin's official       */
+/* guides, 31 Oct 2026): the score is the share of QUALIFYING         */
+/* sentences (prose only — lists, headings and quoted blocks are      */
+/* excluded) over a per-sentence threshold; 0% shows as 0%, scores     */
+/* of 20% and above show the number with blue sentence highlights,    */
+/* and 1–19% shows ONLY "*%" — no number, no highlights — because      */
+/* false positives are more likely in that band. The analysis itself  */
+/* is a transparent heuristic (see analyzeText in humanizerClient.js) */
+/* — NOT Turnitin's proprietary model, and the honesty block below    */
+/* says so, always.                                                   */
+/* ------------------------------------------------------------------ */
+function ProfessorHonesty() {
+  return (
+    <section className="panel prof-honesty">
+      <h3>⚖️ Read this before using any score</h3>
+      <p>
+        This Professor View is an <strong>educational heuristic demo</strong> built with
+        HumanizeAI. It is <strong>not Turnitin</strong>: it uses no proprietary detection
+        model and no plagiarism database, and its percentages are <strong>unvalidated
+        estimates</strong> based on surface patterns only. Similarity / plagiarism checking
+        is out of scope for this tool and is not claimed anywhere.
+      </p>
+      <p>
+        Turnitin&apos;s own guidance for its AI score applies here in full: an AI score is
+        a <strong>single data point, not a decision</strong>. A tool like this may
+        misidentify human-written, AI-generated and AI-paraphrased text, so it must{' '}
+        <strong>never be used as the sole basis for adverse action against a student</strong>.
+        It takes further scrutiny and human judgement, together with your institution&apos;s
+        academic policies, to decide whether anything is wrong at all. Low scores are shown
+        as <strong>*%</strong> — with no number and no highlights — precisely because false
+        positives are more likely in that range.
+      </p>
+    </section>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Document upload for the Professor View — Turnitin-style intake:    */
+/* PDF, Word (.docx) or TXT. Extraction happens ENTIRELY in the       */
+/* browser (pdf.js for PDF, mammoth for DOCX, FileReader via          */
+/* file.text() for TXT): the file is never uploaded anywhere and      */
+/* never reaches a server. pdf.js and mammoth are loaded lazily,      */
+/* only when a document is actually opened. The 30,000-word ceiling   */
+/* matches Turnitin's intake cap; longer documents are truncated to   */
+/* their first 30,000 words and the report says so.                   */
+/* ------------------------------------------------------------------ */
+const PROF_MAX_WORDS = 30000;
+const PROF_FILE_EXTS = ['pdf', 'docx', 'txt'];
+
+async function extractDocumentText(file) {
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  if (ext === 'txt') {
+    return file.text();
+  }
+  const buffer = await file.arrayBuffer();
+  if (ext === 'docx') {
+    const mammoth = await import('mammoth');
+    const out = await mammoth.extractRawText({ arrayBuffer: buffer });
+    return out.value || '';
+  }
+  // PDF: rebuild the text from pdf.js item GEOMETRY. Items are grouped
+  // into visual lines by baseline; a visual line break becomes a real
+  // newline ONLY when its gap is much larger than the page's typical
+  // line gap (a paragraph break). Ordinary wrapped lines are re-joined
+  // with a space — otherwise a wrapped sentence would fracture into
+  // fragments and analyse differently from the same text pasted in.
+  const pdfjs = await import('pdfjs-dist');
+  pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(buffer) }).promise;
+  const pages = [];
+  for (let p = 1; p <= doc.numPages; p += 1) {
+    const page = await doc.getPage(p);
+    const tc = await page.getTextContent();
+    const rows = [];
+    for (const item of tc.items) {
+      if (!('str' in item)) continue;
+      const y = item.transform[5];
+      let row = rows.find((r) => Math.abs(r.y - y) < 2);
+      if (!row) {
+        row = { y, items: [] };
+        rows.push(row);
+      }
+      row.items.push(item);
+    }
+    rows.sort((a, b) => b.y - a.y); // PDF y grows upward: top line first
+    const lines = rows.map((r) => {
+      const items = r.items.sort((a, b) => a.transform[4] - b.transform[4]);
+      let text = '';
+      let prev = null;
+      for (const item of items) {
+        if (prev) {
+          const gapX = item.transform[4] - (prev.transform[4] + prev.width);
+          const fontSize = Math.abs(item.transform[3]) || item.height || 10;
+          if (gapX > fontSize * 0.2) text += ' ';
+        }
+        text += item.str;
+        prev = item;
+      }
+      return { y: r.y, text };
+    }).filter((l) => l.text.trim());
+    const gaps = [];
+    for (let i = 1; i < lines.length; i += 1) gaps.push(lines[i - 1].y - lines[i].y);
+    const sortedGaps = [...gaps].sort((a, b) => a - b);
+    const medianGap = sortedGaps.length
+      ? sortedGaps[Math.floor(sortedGaps.length / 2)]
+      : 0;
+    let out = '';
+    lines.forEach((ln, i) => {
+      if (i === 0) {
+        out = ln.text;
+        return;
+      }
+      const gap = lines[i - 1].y - ln.y;
+      out += (medianGap > 0 && gap > medianGap * 1.4 ? '\n' : ' ') + ln.text;
+    });
+    pages.push(out);
+  }
+  return pages.join('\n');
+}
+
+/* Cut a text to its first `max` words, preserving the original
+ * characters (including newlines) up to the end of the last kept word. */
+function truncateToWords(text, max) {
+  const re = /\S+/g;
+  let m;
+  let seen = 0;
+  let end = text.length;
+  while ((m = re.exec(text)) !== null) {
+    seen += 1;
+    if (seen === max) {
+      end = re.lastIndex;
+      break;
+    }
+  }
+  return text.slice(0, end);
+}
+
+function ProfessorView() {
+  const [text, setText] = useState('');
+  const [report, setReport] = useState(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [flashIdx, setFlashIdx] = useState(null);
+  const [docName, setDocName] = useState(null);
+  const [docInfo, setDocInfo] = useState(null); // { totalWords, truncated }
+  const [uploadError, setUploadError] = useState('');
+  const [extracting, setExtracting] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef(null);
+
+  async function analyse(sourceText) {
+    setError('');
+    setReport(null);
+    setFlashIdx(null);
+    if (!sourceText || !sourceText.trim()) {
+      setError('Please paste a text first — or load one of the samples.');
+      return;
+    }
+    setLoading(true);
+    try {
+      // Server first (same pattern as the humanizer); on a static host
+      // the identical analyzer runs in the browser instead.
+      let data = null;
+      let serverError = null;
+      try {
+        const res = await fetch(`${API_BASE}/api/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: sourceText }),
+        });
+        let parsed = null;
+        try {
+          parsed = await res.json();
+        } catch {
+          parsed = null;
+        }
+        if (parsed && res.ok) data = parsed;
+        else if (parsed && parsed.error) serverError = parsed.error;
+      } catch {
+        data = null;
+      }
+      if (serverError) throw new Error(serverError);
+      if (!data) data = { ...analyzeLocal(sourceText), local: true };
+      setReport(data);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  /* Upload flow: read the file in the browser, put its text into the
+   * same box the paste flow uses, then analyse it straight away so
+   * the professor lands directly on the report. */
+  async function handleFile(file) {
+    setUploadError('');
+    if (!file) return;
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    if (!PROF_FILE_EXTS.includes(ext)) {
+      setUploadError(
+        `That file type is not accepted — sirf PDF, Word (.docx) ya TXT file dein. `
+        + 'Accepted formats: PDF, Word (.docx), TXT.',
+      );
+      return;
+    }
+    setExtracting(true);
+    setReport(null);
+    setDocInfo(null);
+    try {
+      const raw = await extractDocumentText(file);
+      const totalWords = countWords(raw);
+      if (totalWords < 10) {
+        // A text-based file of this type with essentially no words in
+        // it is, in practice, a scanned / image-only document.
+        if (ext === 'pdf') {
+          setUploadError(
+            'Is PDF mein parhne wala text nahi mila — ye scanned/image PDF lagti hai. '
+            + 'Text wali PDF ya Word file try karein.',
+          );
+        } else {
+          setUploadError('Is file mein parhne wala text nahi mila. Koi aur file try karein.');
+        }
+        return;
+      }
+      let usable = raw;
+      let truncated = false;
+      if (totalWords > PROF_MAX_WORDS) {
+        usable = truncateToWords(raw, PROF_MAX_WORDS);
+        truncated = true;
+      }
+      setText(usable);
+      setDocName(file.name);
+      setDocInfo({ totalWords, truncated });
+      await analyse(usable);
+    } catch {
+      setUploadError(
+        'This file could not be read — file corrupt, encrypted ya password-protected '
+        + 'lagti hai. Koi aur file try karein.',
+      );
+    } finally {
+      setExtracting(false);
+    }
+  }
+
+  function jumpToSentence(i) {
+    const el = document.getElementById(`prof-sent-${i}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setFlashIdx(i);
+    setTimeout(() => setFlashIdx((cur) => (cur === i ? null : cur)), 1600);
+  }
+
+  const words = countWords(text);
+  const proseSentences = report ? report.sentences.filter((s) => s.kind === 'prose') : [];
+  const showBar = report && report.state !== 'tooShort' && report.state !== 'tooLong';
+  const sp = report ? report.details.spelling : { us: 0, uk: 0 };
+
+  return (
+    <div className="prof">
+      <section className="panel prof-intro prof-no-print">
+        <h2>🎓 Professor View — AI Writing Report</h2>
+        <p>
+          Upload a student&apos;s document (PDF, Word or TXT) or paste the text, and get a
+          Turnitin-style report: what share of the{' '}
+          <strong>qualifying sentences</strong> (prose only — list items, headings and quoted
+          blocks are excluded, just as Turnitin excludes non-prose) show AI-like patterns.
+          A report needs <strong>at least 300 words</strong> of prose; the ceiling is 30,000
+          words. Scores under the display threshold are shown as <strong>*%</strong> with no
+          number and no highlights, because false positives are more likely there.
+        </p>
+      </section>
+
+      <section className="panel prof-controls prof-no-print">
+        <div className="panel-head">
+          <h3>Submission text</h3>
+          <span className="word-count">{words} words</span>
+        </div>
+
+        <div
+          className={`prof-upload${dragOver ? ' drag' : ''}`}
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragOver(false);
+            handleFile(e.dataTransfer.files && e.dataTransfer.files[0]);
+          }}
+        >
+          <p className="prof-upload-title">📄 Upload a document</p>
+          <p className="prof-upload-hint">
+            Drag &amp; drop the student&apos;s file here, or choose it — the report is
+            generated as soon as the file is read.
+          </p>
+          <button
+            type="button"
+            className="btn primary"
+            onClick={() => fileInputRef.current && fileInputRef.current.click()}
+            disabled={extracting}
+          >
+            {extracting ? 'Reading file…' : 'Choose file'}
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf,.docx,.txt"
+            hidden
+            onChange={(e) => {
+              handleFile(e.target.files && e.target.files[0]);
+              e.target.value = '';
+            }}
+          />
+          <p className="prof-upload-formats">
+            Accepted: <strong>PDF</strong>, <strong>Word (.docx)</strong>,{' '}
+            <strong>TXT</strong> — the same intake as Turnitin. Up to 30,000 words
+            are analysed.
+          </p>
+          <p className="prof-upload-privacy">
+            🔒 File sirf aap ke browser mein parhi jati hai — kahin upload nahi hoti,
+            kisi server par nahi jati.
+          </p>
+          {uploadError && <p className="error">{uploadError}</p>}
+          {docInfo && (
+            <p className="prof-upload-loaded">
+              📄 <strong>{docName}</strong> — {docInfo.totalWords.toLocaleString()} words
+              read from the file.
+              {docInfo.truncated && (
+                <> Sirf pehle 30,000 words analyse hue — document us se lamba tha
+                (30,000-word ceiling, bilkul Turnitin ki tarah).</>
+              )}
+            </p>
+          )}
+        </div>
+
+        <textarea
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value);
+            setDocName(null);
+            setDocInfo(null);
+          }}
+          placeholder="…or paste the student's text here (300+ words of prose for a full report)…"
+          rows={12}
+        />
+        <div className="row">
+          <button type="button" className="btn primary" onClick={() => analyse(text)} disabled={loading}>
+            {loading ? 'Analysing…' : 'Analyse'}
+          </button>
+          <button
+            type="button" className="btn ghost"
+            onClick={() => { setText(PROF_AI_SAMPLE); setReport(null); setError(''); setUploadError(''); setDocName(null); setDocInfo(null); }}
+          >
+            Load AI-style sample
+          </button>
+          <button
+            type="button" className="btn ghost"
+            onClick={() => { setText(PROF_HUMAN_SAMPLE); setReport(null); setError(''); setUploadError(''); setDocName(null); setDocInfo(null); }}
+          >
+            Load human-style sample
+          </button>
+          <button
+            type="button" className="btn ghost"
+            onClick={() => { setText(''); setReport(null); setError(''); setUploadError(''); setDocName(null); setDocInfo(null); }}
+          >
+            Clear
+          </button>
+        </div>
+        {error && <p className="error">{error}</p>}
+      </section>
+
+      {report && (
+        <div className="prof-report" id="prof-report">
+          <div className="prof-print-head">
+            <h2>AI Writing Report — HumanizeAI Professor View</h2>
+            <p className="prof-date">
+              Generated {new Date().toLocaleString()} · Heuristic demo — not a Turnitin report
+            </p>
+            {docName && (
+              <p className="prof-date">
+                Document: <strong>{docName}</strong>
+                {docInfo && docInfo.truncated && (
+                  <> · First 30,000 of {docInfo.totalWords.toLocaleString()} words analysed
+                  (30,000-word ceiling)</>
+                )}
+              </p>
+            )}
+          </div>
+
+          {(report.state === 'tooShort' || report.state === 'tooLong') ? (
+            <section className="panel prof-score prof-score-na">
+              <span className="prof-big">- -</span>
+              <span className="prof-score-label">no report generated</span>
+              <p className="prof-interp">{report.interpretation}</p>
+            </section>
+          ) : (
+            <section className="panel prof-score">
+              <span className="prof-big">{report.displayScore}</span>
+              <span className="prof-score-label">
+                of qualifying text detected as AI-pattern
+              </span>
+              <p className="prof-interp">{report.interpretation}</p>
+            </section>
+          )}
+
+          {showBar && (
+            <section className="panel prof-breakdown">
+              <h3>Submission Breakdown</h3>
+              <div className="prof-bar" role="group" aria-label="Submission breakdown bar">
+                {proseSentences.map((s) => (
+                  <button
+                    key={s.index}
+                    type="button"
+                    className={`prof-seg${s.flagged ? ' flagged' : ''}`}
+                    style={{ flexGrow: Math.max(1, countWords(s.text)) }}
+                    title={`Sentence ${s.index + 1}${s.flagged ? ' — flagged as AI-pattern' : ''}`}
+                    onClick={() => jumpToSentence(s.index)}
+                  />
+                ))}
+              </div>
+              <p className="prof-legend">
+                One segment per qualifying sentence, sized by its length.{' '}
+                {report.state === 'scored'
+                  ? 'Blue = flagged as AI-pattern. Click a segment to jump to that sentence.'
+                  : 'No sentence is highlighted in this score range. Click a segment to jump to that sentence.'}
+              </p>
+            </section>
+          )}
+
+          <div className="prof-cols">
+            <section className="panel prof-text">
+              <h3>Submission</h3>
+              <p className="prof-doc">
+                {report.sentences.map((s) => (
+                  <Fragment key={s.index}>
+                    {s.index === 0 ? null : s.newLine ? <br /> : ' '}
+                    <span
+                      id={`prof-sent-${s.index}`}
+                      className={[
+                        s.kind === 'excluded' ? 'prof-excl' : '',
+                        s.flagged ? 'prof-hl' : '',
+                        flashIdx === s.index ? 'prof-flash' : '',
+                      ].join(' ')}
+                      title={s.kind === 'excluded' ? `Not counted — ${s.sub}` : undefined}
+                    >
+                      {s.text}
+                    </span>
+                  </Fragment>
+                ))}
+              </p>
+              {report.state === 'scored' && (
+                <p className="prof-legend">
+                  Blue highlights = sentences over the AI-pattern threshold. Grey text is
+                  non-prose (list items, headings, quoted blocks) and is not counted.
+                </p>
+              )}
+            </section>
+
+            <div className="prof-side">
+              <section className="panel prof-flags">
+                <h3>🚩 Integrity Flags</h3>
+                {report.flags.total === 0 ? (
+                  <p>
+                    No flags — no hidden characters and no replaced characters found.
+                    A flag is not necessarily an indicator of a problem; it marks a place
+                    worth a closer look.
+                  </p>
+                ) : (
+                  <>
+                    {report.flags.hidden.count > 0 && (
+                      <div className="prof-flag-item">
+                        <strong>Hidden characters:</strong>{' '}
+                        {report.flags.hidden.count} found (
+                        {report.flags.hidden.items
+                          .map((i) => `${i.code} ×${i.count}`)
+                          .join(', ')}
+                        ).
+                        {report.flags.hidden.items[0] && (
+                          <> First in: “{report.flags.hidden.items[0].snippet}…”</>
+                        )}
+                      </div>
+                    )}
+                    {report.flags.homoglyphs.count > 0 && (
+                      <div className="prof-flag-item">
+                        <strong>Replaced characters:</strong>{' '}
+                        {report.flags.homoglyphs.count} lookalike character(s) in{' '}
+                        {report.flags.homoglyphs.words.length} word(s):{' '}
+                        {report.flags.homoglyphs.words
+                          .map((w) => `“${w.word}” (${w.chars
+                            .map((c) => `${c.script} ${c.code}`)
+                            .join(', ')})`)
+                          .join('; ')}
+                        .
+                      </div>
+                    )}
+                    <p className="prof-flag-note">
+                      A flag is not necessarily an indicator of a problem. However, we
+                      recommend you focus your attention there for further review.
+                    </p>
+                  </>
+                )}
+              </section>
+
+              <section className="panel prof-details">
+                <h3>Document Details</h3>
+                <dl>
+                  <div><dt>Total words</dt><dd>{report.counts.totalWords}</dd></div>
+                  <div><dt>Text segments</dt><dd>{report.counts.totalSentences}</dd></div>
+                  <div>
+                    <dt>Qualifying sentences</dt>
+                    <dd>{report.counts.qualifyingSentences}</dd>
+                  </div>
+                  <div>
+                    <dt>Non-prose segments excluded</dt>
+                    <dd>{report.counts.excludedSegments}</dd>
+                  </div>
+                  <div>
+                    <dt>Average sentence length</dt>
+                    <dd>{report.details.avgSentenceLength} words</dd>
+                  </div>
+                  <div>
+                    <dt>Flagged sentences</dt>
+                    <dd>
+                      {report.state === 'scored' || report.state === 'zero'
+                        ? report.details.flaggedCount
+                        : '— (not shown in this score range)'}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Spelling mix</dt>
+                    <dd>
+                      US ×{sp.us} · UK ×{sp.uk}
+                      {sp.us > 0 && sp.uk > 0
+                        ? ' — mixed US/UK spelling, worth a look'
+                        : ''}
+                    </dd>
+                  </div>
+                </dl>
+              </section>
+            </div>
+          </div>
+
+          <div className="row prof-actions prof-no-print">
+            <button type="button" className="btn primary" onClick={() => window.print()}>
+              Download / Print Report
+            </button>
+          </div>
+        </div>
+      )}
+
+      <ProfessorHonesty />
+    </div>
+  );
+}
+
 function MainApp({ onLock }) {
+  const [view, setView] = useState('humanizer'); // 'humanizer' | 'professor'
   const [input, setInput] = useState('');
   const [mode, setMode] = useState('Natural');
   const [intensity, setIntensity] = useState('Medium');
@@ -385,11 +957,24 @@ function MainApp({ onLock }) {
         {serverEngine === 'demo' && <span className="badge demo">Demo Mode</span>}
         {serverEngine === 'llm' && <span className="badge llm">AI Engine</span>}
         {serverEngine === 'offline' && <span className="badge demo">Demo Mode</span>}
+        {view === 'humanizer' ? (
+          <button type="button" className="btn ghost small" onClick={() => setView('professor')}>
+            🎓 Professor View
+          </button>
+        ) : (
+          <button type="button" className="btn ghost small" onClick={() => setView('humanizer')}>
+            ← Back to Humanizer
+          </button>
+        )}
         <button type="button" className="btn ghost small lock-btn" onClick={onLock}>
           🔒 Lock
         </button>
       </header>
 
+      {view === 'professor' ? (
+        <ProfessorView />
+      ) : (
+        <>
       <main className="layout">
         <section className="panel">
           <div className="panel-head">
@@ -476,7 +1061,7 @@ function MainApp({ onLock }) {
             <p className="selector-hint">
               {depth === 'Basic'
                 ? 'Basic: one rewrite, still checked by the full meaning gate.'
-                : 'Advanced: up to 3 rewrites compete; the safest, most natural one wins.'}
+                : 'Advanced: up to 4 rewrites compete; the safest, most natural one wins.'}
             </p>
           </div>
 
@@ -742,6 +1327,8 @@ function MainApp({ onLock }) {
           </ul>
         </section>
       )}
+        </>
+      )}
 
       <footer className="footer">
         AI Writing Assistant — always review the output yourself before using it.
@@ -799,10 +1386,10 @@ function LoginGate({ onUnlock }) {
       <div className="star star-4" />
       <div className="sunburst" aria-hidden="true" />
       <div className="orbit" aria-hidden="true">
-        <span className="orbit-item orbit-top">⭐</span>
-        <span className="orbit-item orbit-right">☁️</span>
-        <span className="orbit-item orbit-bottom">🎈</span>
-        <span className="orbit-item orbit-left">🌈</span>
+        <span className="orbit-item orbit-item-1">⭐</span>
+        <span className="orbit-item orbit-item-2">☁️</span>
+        <span className="orbit-item orbit-item-3">🎈</span>
+        <span className="orbit-item orbit-item-4">🌈</span>
       </div>
       <div className="sun-face" aria-hidden="true">🌞</div>
       <div

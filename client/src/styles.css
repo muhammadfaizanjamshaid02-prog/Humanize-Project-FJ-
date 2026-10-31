@@ -252,33 +252,34 @@ textarea:focus { outline: 2px solid #5b5bd6; outline-offset: 1px; }
   to { transform: rotate(360deg); }
 }
 
-/* Orbit ring: cartoon shapes circle the card; each shape counter-
- * rotates at the same speed so it stays upright while orbiting. */
+/* Orbit ring of cheerful shapes circling the card — ⭐ top, ☁️
+ * right, 🎈 bottom, 🌈 left on a slow 30s orbit. The ring rotates
+ * one way and every shape counter-rotates at the same speed, so the
+ * shapes travel around the card while staying upright. */
 .orbit {
   position: absolute; z-index: 1; pointer-events: none;
   left: 50%; top: 50%;
   width: min(620px, 140vmin); height: min(620px, 140vmin);
+  margin-left: calc(min(620px, 140vmin) / -2);
+  margin-top: calc(min(620px, 140vmin) / -2);
   animation: orbitSpin 30s linear infinite;
 }
-@keyframes orbitSpin {
-  from { transform: translate(-50%, -50%) rotate(0deg); }
-  to { transform: translate(-50%, -50%) rotate(360deg); }
-}
 .orbit-item {
-  position: absolute; line-height: 1;
-  font-size: 34px;
-  filter: drop-shadow(0 4px 6px rgba(60, 30, 110, 0.35));
-  animation: orbitCounter 30s linear infinite;
+  position: absolute;
+  font-size: 34px; line-height: 1;
+  filter: drop-shadow(0 4px 7px rgba(60, 30, 110, 0.3));
+  animation: orbitSpinBack 30s linear infinite;
 }
-.orbit-top { left: 50%; top: 0; }
-.orbit-right { left: 100%; top: 50%; }
-.orbit-bottom { left: 50%; top: 100%; }
-.orbit-left { left: 0; top: 50%; }
-@keyframes orbitCounter {
-  from { transform: translate(-50%, -50%) rotate(0deg); }
-  to { transform: translate(-50%, -50%) rotate(-360deg); }
+.orbit-item-1 { top: 0; left: 50%; translate: -50% -50%; }
+.orbit-item-2 { right: 0; top: 50%; translate: 50% -50%; }
+.orbit-item-3 { bottom: 0; left: 50%; translate: -50% 50%; }
+.orbit-item-4 { left: 0; top: 50%; translate: -50% -50%; }
+@keyframes orbitSpin {
+  to { transform: rotate(360deg); }
 }
-
+@keyframes orbitSpinBack {
+  to { transform: rotate(-360deg); }
+}
 /* Cartoon sun face slowly spinning in the top-left corner. */
 .sun-face {
   position: absolute; z-index: 1; pointer-events: none;
@@ -292,7 +293,8 @@ textarea:focus { outline: 2px solid #5b5bd6; outline-offset: 1px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .sunburst, .orbit, .orbit-item, .sun-face, .avatar-wrap, .wave-hand {
+  .sunburst, .sun-face, .avatar-wrap, .wave-hand,
+  .orbit, .orbit-item {
     animation-play-state: paused;
   }
 }
@@ -431,3 +433,86 @@ textarea:focus { outline: 2px solid #5b5bd6; outline-offset: 1px; }
 }
 
 .lock-btn { align-self: flex-start; }
+
+/* ------------------------------------------------------------------ */
+/* Professor View (Turnitin-style AI writing report)                   */
+/* ------------------------------------------------------------------ */
+.prof { display: flex; flex-direction: column; gap: 18px; }
+.prof h2, .prof h3 { margin-top: 0; }
+.prof-intro p { margin-bottom: 0; line-height: 1.55; }
+.prof-controls textarea { width: 100%; box-sizing: border-box; }
+.prof-upload {
+  border: 2px dashed #b9c4d4; border-radius: 12px; padding: 18px;
+  text-align: center; margin-bottom: 16px; background: #f7f9fc;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.prof-upload.drag { border-color: #2456a6; background: #e8f0fe; }
+.prof-upload-title { font-size: 19px; font-weight: 800; margin: 0 0 4px; color: #2456a6; }
+.prof-upload-hint { margin: 0 0 12px; color: #445; line-height: 1.5; }
+.prof-upload-formats { margin: 12px 0 0; color: #556; font-size: 13.5px; }
+.prof-upload-privacy { margin: 6px 0 0; color: #556; font-size: 13.5px; }
+.prof-upload-loaded {
+  margin: 12px 0 0; padding: 8px 10px; border-radius: 8px;
+  background: #e6f4ea; color: #1e6b34; font-size: 14px; line-height: 1.5;
+}
+.prof-upload .error { margin-bottom: 0; }
+.prof-report { display: flex; flex-direction: column; gap: 18px; }
+.prof-print-head h2 { margin-bottom: 4px; }
+.prof-date { margin: 0; color: #667; font-size: 13px; }
+.prof-score { text-align: center; padding: 22px 16px; }
+.prof-big {
+  display: block; font-size: 64px; font-weight: 800; line-height: 1;
+  color: #2456a6; font-family: 'Baloo 2', inherit;
+}
+.prof-score-na .prof-big { color: #8a8f98; }
+.prof-score-label { display: block; margin-top: 6px; font-weight: 600; color: #445; }
+.prof-interp { max-width: 640px; margin: 10px auto 0; line-height: 1.55; }
+.prof-bar { display: flex; gap: 2px; height: 26px; }
+.prof-seg {
+  flex-basis: 0; min-width: 4px; border: none; border-radius: 3px;
+  background: #d4d8de; cursor: pointer; padding: 0;
+}
+.prof-seg:hover { outline: 2px solid #2456a6; outline-offset: 1px; }
+.prof-seg.flagged { background: #2f6fd0; }
+.prof-legend { color: #667; font-size: 13px; margin-bottom: 0; }
+.prof-cols { display: grid; grid-template-columns: 1.6fr 1fr; gap: 18px; align-items: start; }
+.prof-side { display: flex; flex-direction: column; gap: 18px; }
+.prof-doc { line-height: 1.75; white-space: normal; }
+.prof-hl { background: #bcd7ff; border-radius: 3px; padding: 0 1px; }
+.prof-excl { color: #9aa0a8; }
+.prof-flash { animation: profFlash 1.6s ease; }
+@keyframes profFlash {
+  0%, 60% { background: #ffd93d; }
+  100% { background: transparent; }
+}
+.prof-hl.prof-flash { animation-name: profFlashHl; }
+@keyframes profFlashHl {
+  0%, 60% { background: #ffd93d; }
+  100% { background: #bcd7ff; }
+}
+.prof-flag-item { margin-bottom: 10px; line-height: 1.55; word-break: break-word; }
+.prof-flag-note { color: #667; font-size: 13px; margin-bottom: 0; }
+.prof-details dl { margin: 0; display: flex; flex-direction: column; gap: 8px; }
+.prof-details dl div { display: flex; justify-content: space-between; gap: 12px; }
+.prof-details dt { color: #556; }
+.prof-details dd { margin: 0; font-weight: 700; text-align: right; }
+.prof-honesty { border-left: 5px solid #e0a800; line-height: 1.6; }
+.prof-actions { margin-top: 0; }
+
+@media (max-width: 900px) {
+  .prof-cols { grid-template-columns: 1fr; }
+}
+
+/* Print: a clean report — cover header, overview, breakdown, the
+ * highlighted submission, details and the honesty note; no app chrome. */
+@media print {
+  .header, .footer, .prof-no-print, .history { display: none !important; }
+  body { background: #fff !important; }
+  .page { max-width: none; padding: 0; }
+  .prof-cols { grid-template-columns: 1fr; }
+  .prof-hl, .prof-seg.flagged {
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  .prof-seg { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .panel { box-shadow: none !important; break-inside: avoid; }
+}

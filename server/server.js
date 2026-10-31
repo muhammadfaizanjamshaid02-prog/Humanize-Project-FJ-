@@ -2,13 +2,14 @@
 
 const express = require('express');
 const cors = require('cors');
-const { humanize, llmConfig, MODES, INTENSITIES, PURPOSES, DEPTHS } = require('./humanizer');
+const { humanize, analyzeText, llmConfig, MODES, INTENSITIES, PURPOSES, DEPTHS } = require('./humanizer');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
-app.use(express.json({ limit: '100kb' }));
+// 1mb: /api/analyze accepts Turnitin-scale texts (up to 30,000 words).
+app.use(express.json({ limit: '1mb' }));
 
 app.get('/api/health', (req, res) => {
   const cfg = llmConfig();
@@ -62,6 +63,23 @@ app.post('/api/humanize', async (req, res) => {
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: 'Something went wrong while humanizing. Please try again.' });
+  }
+});
+
+/* Professor View — Turnitin-style AI-writing analysis (heuristic).
+ * No word-count rejection here by design: short/over-long texts come
+ * back as report STATES (tooShort / tooLong), exactly like Turnitin's
+ * indicator states, instead of errors. */
+app.post('/api/analyze', (req, res) => {
+  try {
+    const { text } = req.body || {};
+    if (typeof text !== 'string' || !text.trim()) {
+      return res.status(400).json({ error: 'Please paste a text to analyse first.' });
+    }
+    return res.json(analyzeText(text));
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: 'Something went wrong while analysing. Please try again.' });
   }
 });
 

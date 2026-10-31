@@ -1,1 +1,1 @@
-{"dependencies":{"react":"^18.3.1","react-dom":"^18.3.1"},"devDependencies":{"@vitejs/plugin-react":"^4.3.1","vite":"^5.4.8"},"name":"humanize-ai-client","private":true,"scripts":{"build":"vite build","dev":"vite","preview":"vite preview"},"version":"1.0.0"}
+{"dependencies":{"mammoth":"^1.13.0","pdfjs-dist":"^6.4.299","react":"^18.3.1","react-dom":"^18.3.1"},"devDependencies":{"@vitejs/plugin-react":"^4.3.1","vite":"^5.4.8"},"name":"humanize-ai-client","private":true,"scripts":{"build":"vite build","dev":"vite","preview":"vite preview"},"version":"1.0.0"}

@@ -28,8 +28,9 @@
  *    contraction voice, rotation strength) + the LLM prompt.
  *  - DEPTH (QuillBot Basic vs Advanced): Basic = 1 candidate, gate
  *    still applied (single verification run), fail-safe still applies;
- *    Advanced = the full v2 loop (3 candidates, double verification,
- *    naturalness competition). Gate conditions are identical in both.
+ *    Advanced = the full v2 loop (up to 4 candidates since v3.1,
+ *    double verification, naturalness competition). Gate conditions
+ *    are identical in both.
  *  - CUSTOM VOICE (Grammarly-style): an optional writing sample
  *    (>= 40 words) is reduced to style STATISTICS only (average
  *    sentence length, contraction tendency, average word length);
@@ -273,6 +274,20 @@ for (const [formal, simple] of Object.entries(SYNONYMS)) {
   CANONICAL[formal] = simple.split(' ')[0];
   CANONICAL[simple.split(' ')[0]] = simple.split(' ')[0];
 }
+// One build-loop artefact: "nowadays" -> "these days" has a STOPWORD as
+// its head word, so head-word canonicalisation would map the input word
+// to a stopword the output side then drops — an unfair mismatch. The
+// content word of the phrase is "day", so both directions use it.
+CANONICAL.nowadays = 'day';
+
+// Multi-word approved synonyms ("take part", "carry out", "look at"…)
+// collapse to the SAME canonical token the formal word maps to, so the
+// checker treats the simple phrase and the formal word as one concept
+// in both directions (see normalizeForCheck).
+const SIMPLE_PHRASE_CANON = {};
+for (const [formal, simple] of Object.entries(SYNONYMS)) {
+  if (simple.includes(' ')) SIMPLE_PHRASE_CANON[simple] = CANONICAL[formal];
+}
 
 // Safe alternatives used ONLY by repetition reduction (3rd+ occurrence).
 // They are registered in CANONICAL too, so the meaning/coverage checks
@@ -482,13 +497,114 @@ function mergeShortSentences(text) {
   return out.join(' ');
 }
 
-/* The demo engine generates up to THREE candidate strategies for the
+/* Strategy D helper: split one sentence at a safe clause boundary —
+ * ", and" / ", but" / ", so" / ";" — choosing the boundary nearest the
+ * middle where BOTH sides keep at least 5 words (a real clause each).
+ * Only the boundary punctuation and the tail's capitalisation change;
+ * the word sequence is untouched, so meaning cannot move. */
+function splitSentenceAtClause(sentence) {
+  const boundaries = [', and ', ', but ', ', so ', '; '];
+  const total = sentence.split(/\s+/).filter(Boolean).length;
+  let best = null;
+  for (const sep of boundaries) {
+    let idx = sentence.indexOf(sep);
+    while (idx !== -1) {
+      const headWords = sentence.slice(0, idx).split(/\s+/).filter(Boolean).length;
+      const tailWords = total - headWords;
+      if (headWords >= 5 && tailWords >= 5) {
+        const dist = Math.abs(headWords - total / 2);
+        if (!best || dist < best.dist) best = { idx, sep, dist };
+      }
+      idx = sentence.indexOf(sep, idx + 1);
+    }
+  }
+  if (!best) return null;
+  const head = sentence.slice(0, best.idx).replace(/[\s;]+$/, '');
+  let tail = sentence.slice(best.idx + best.sep.length);
+  if (best.sep !== '; ') {
+    const conj = best.sep.replace(/[, ]/g, '');
+    tail = `${conj.charAt(0).toUpperCase() + conj.slice(1)} ${tail}`;
+  } else {
+    tail = tail.charAt(0).toUpperCase() + tail.slice(1);
+  }
+  return [`${head}.`, tail];
+}
+
+/* Strategy D helper: BURSTINESS PASS. Human writing mixes very short
+ * and long sentences; machine text hovers at one length. This pass
+ * only restructures at clause/sentence boundaries — it splits a
+ * sentence at a safe clause boundary (", and" / ", but" / ", so" /
+ * ";"), or merges two adjacent sentences with ", and". The search is
+ * greedy: every round, ALL safe moves are scored by the sentence-
+ * length spread (std-dev) they would produce, and only the single
+ * best IMPROVING move is applied, until the spread reaches a human-
+ * like level or no safe move improves it. Not one content word is
+ * added, dropped or reordered inside a clause, so the meaning gate
+ * sees exactly the same facts before and after. */
+function varySentenceLengths(text) {
+  const wordCount = (s) => s.split(/\s+/).filter(Boolean).length;
+  const std = (xs) => {
+    if (xs.length === 0) return 0;
+    const mean = xs.reduce((a, b) => a + b, 0) / xs.length;
+    return Math.sqrt(xs.reduce((a, b) => a + (b - mean) ** 2, 0) / xs.length);
+  };
+  const spread = (arr) => std(arr.map(wordCount));
+  const mergePair = (a, b) => {
+    const head = a.replace(/\.$/, '');
+    const tail = /^[A-Z][a-z]/.test(b) ? b.charAt(0).toLowerCase() + b.slice(1) : b;
+    return `${head}, and ${tail}`;
+  };
+  let sentences = sentenceList(text);
+  for (let round = 0; round < 6 && sentences.length >= 2; round += 1) {
+    const cur = spread(sentences);
+    if (cur >= 7) break;
+    let best = null;
+    for (let i = 0; i < sentences.length; i += 1) {
+      // Candidate move 1: split sentence i at a clause boundary.
+      if (wordCount(sentences[i]) >= 16) {
+        const parts = splitSentenceAtClause(sentences[i]);
+        if (parts) {
+          const next = [...sentences.slice(0, i), ...parts, ...sentences.slice(i + 1)];
+          const s = spread(next);
+          if (s > cur + 0.01 && (!best || s > best.s)) best = { next, s };
+        }
+      }
+      // Candidate move 2: merge sentences i and i+1.
+      if (i + 1 < sentences.length) {
+        const a = sentences[i];
+        const b = sentences[i + 1];
+        const wa = wordCount(a);
+        // Guards: combined length cap; head must be a plain statement
+        // (never absorb a question/exclamation); never merge across
+        // an abbreviation fragment (the PROTECT pass leaves "Dear
+        // Mr." as "⟦E1⟧ ⟦E2⟧." — a two-word pseudo-sentence that
+        // must round-trip untouched); never merge into a But/However-
+        // led sentence (", and but …" / ", and however …" are wrong).
+        if (wa + wordCount(b) <= 34 && /\.$/.test(a)
+          && !(wa < 4 && /⟦E\d+⟧\.$/.test(a))
+          && !/^(But|However)\b/i.test(b)) {
+          const next = [...sentences.slice(0, i), mergePair(a, b), ...sentences.slice(i + 2)];
+          const s = spread(next);
+          if (s > cur + 0.01 && (!best || s > best.s)) best = { next, s };
+        }
+      }
+    }
+    if (!best) break;
+    sentences = best.next;
+  }
+  return sentences.join(' ');
+}
+
+/* The demo engine generates up to FOUR candidate strategies for the
  * Naturalness Optimization Loop:
  *   A — standard pipeline for the chosen mode/intensity
  *   B — stronger restructuring: forced sentence splitting + merging
  *       of very short sentences (bigger sentence-length variation)
  *   C — rotation emphasis: synonyms rotate from the 2nd occurrence
- *       and transition de-duplication runs in its strictest form */
+ *       and transition de-duplication runs in its strictest form
+ *   D — Fidelity+Flow (v3.1): light-touch rewrite (phrase fixes,
+ *       contractions, grammar — synonym swaps kept minimal) plus the
+ *       burstiness pass, for very high meaning with natural rhythm */
 function demoRewrite(protectedText, mode, intensity, strategy = 'A', tune = {}) {
   let out = protectedText;
 
@@ -497,8 +613,12 @@ function demoRewrite(protectedText, mode, intensity, strategy = 'A', tune = {}) 
     out = replacePhrase(out, from, to, true);
   }
 
-  // 2) Synonyms (Light is gentler than Medium/Strong)
-  const simpleFirst = mode === 'Simple' ? 'Strong' : intensity;
+  // 2) Synonyms (Light is gentler than Medium/Strong). Strategy D is
+  //    the fidelity path: synonym swaps stay minimal (Light = first
+  //    occurrence of each formal word only).
+  const simpleFirst = strategy === 'D'
+    ? 'Light'
+    : (mode === 'Simple' ? 'Strong' : intensity);
   out = applySynonyms(out, simpleFirst);
 
   // 3) Voice: contractions for natural/casual voices, expansions for
@@ -520,18 +640,27 @@ function demoRewrite(protectedText, mode, intensity, strategy = 'A', tune = {}) 
   }
 
   // 4) Technique 8: repetition reduction (C rotates from the 2nd use;
-  //    a purpose preset such as Marketing can also lower the trigger)
-  out = reduceRepetition(out, tune.rotateFrom ?? (strategy === 'C' ? 2 : 3));
+  //    a purpose preset such as Marketing can also lower the trigger).
+  //    Strategy D skips rotation entirely — fidelity first.
+  if (strategy !== 'D') {
+    out = reduceRepetition(out, tune.rotateFrom ?? (strategy === 'C' ? 2 : 3));
+  }
 
   // 5) Sentence rhythm: split heavy sentences on Strong (and for
   //    Simple mode); strategy B always restructures, then merges
   //    shorts. v3: purpose presets can force the pass (Email /
-  //    Marketing) and set its clause-size thresholds.
-  if (intensity === 'Strong' || (mode === 'Simple' && intensity === 'Medium')
-    || strategy === 'B' || tune.alwaysSplit) {
+  //    Marketing) and set its clause-size thresholds. Strategy D does
+  //    its rhythm work in the burstiness pass instead (step 5b).
+  if (strategy !== 'D'
+    && (intensity === 'Strong' || (mode === 'Simple' && intensity === 'Medium')
+      || strategy === 'B' || tune.alwaysSplit)) {
     out = splitLongSentences(out, tune.splitMinBefore ?? 6, tune.splitMinAfter ?? 5);
   }
   if (strategy === 'B') out = mergeShortSentences(out);
+
+  // 5b) Strategy D: burstiness pass — vary sentence lengths by safe
+  //     clause-boundary splits and short-sentence merges only.
+  if (strategy === 'D') out = varySentenceLengths(out);
 
   // 6) Technique 6: transition optimization (C = strictest form)
   out = optimizeTransitions(out, strategy === 'C');
@@ -660,8 +789,45 @@ function stem(word) {
   return w;
 }
 
+/* Checker-side equivalence normalisation (v3.1). Applied to BOTH the
+ * original and the rewrite before any meaning/coverage counting, and
+ * containing ONLY rewrites the demo engine itself can perform, so the
+ * two sides are compared in the engine's own vocabulary:
+ *   1. multi-word approved synonyms collapse to their canonical token
+ *      ("take part" -> the token "participate" canonicalises to);
+ *   2. the engine's PHRASE_REPLACEMENTS map is applied verbatim
+ *      (longest phrase first), including the empty-string deletions,
+ *      plus the one multi-word transition variant the transition
+ *      optimiser can emit ("that is why" is its variant of "so");
+ *   3. contractions expand via EXPANSIONS — the exact map the
+ *      negation lock already uses — plus the generic n't rule.
+ * Nothing topic-related is equated here; a word the engine never
+ * touches keeps its own identity on both sides. */
+const PHRASE_EQUIVALENCES = [...PHRASE_REPLACEMENTS, ['that is why', 'so']]
+  .sort((a, b) => b[0].length - a[0].length);
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeForCheck(text) {
+  let t = text;
+  for (const [phrase, canon] of Object.entries(SIMPLE_PHRASE_CANON)) {
+    t = t.replace(new RegExp(`\\b${escapeRegExp(phrase)}\\b`, 'gi'), canon);
+  }
+  for (const [from, to] of PHRASE_EQUIVALENCES) {
+    t = t.replace(new RegExp(`\\b${escapeRegExp(from)}\\b`, 'gi'), to);
+  }
+  for (const [short, full] of EXPANSIONS) {
+    t = t.replace(new RegExp(`\\b${short.replace("'", "['’]")}\\b`, 'gi'), ` ${full} `);
+  }
+  t = t.replace(/(\w+)n['’]t\b/gi, '$1 not');
+  return t;
+}
+
 function contentWordList(text) {
-  const tokens = text.toLowerCase().match(/[a-z][a-z'-]*|\d[\d,]*(?:\.\d+)?%?/g) || [];
+  const tokens = normalizeForCheck(text).toLowerCase()
+    .match(/[a-z][a-z'-]*|\d[\d,]*(?:\.\d+)?%?/g) || [];
   const list = [];
   for (const raw of tokens) {
     const w = raw.replace(/['-]/g, '');
@@ -904,35 +1070,41 @@ function extractNegations(text) {
 
 /* ---------------- v2 checks: FACT COVERAGE / NO NEW FACTS --------- */
 /* Concepts = the distinct stemmed, synonym-canonicalised content
- * words produced by the same machinery as the meaning score, with two
- * honest adjustments, applied identically to BOTH sides:
+ * words produced by the same machinery as the meaning score. Before
+ * any counting, BOTH sides pass through normalizeForCheck(), which
+ * applies ONLY equivalences the engine itself can produce:
  *  - multi-word approved synonyms ("take part", "carry out", "look
- *    at"…) are collapsed to their head word first, so using the simple
- *    phrase counts as the same concept as the formal word, and the
- *    helper word ("part", "out") is not counted as a new fact;
- *  - GLUE_WORDS (discourse markers: furthermore, however, also…)
- *    carry no facts, so they are excluded from both concept sets.
- *    Meta-commentary filler the demo engine deletes outright ("it is
- *    important to note that") is excluded for the same reason: the
- *    words "important / note" there announce the sentence, they are
- *    not facts in it. Approved-synonym meanings of those words still
- *    canonicalise to the same concept on both sides via CANONICAL. */
+ *    at"…) collapse to the formal word's canonical token, so using
+ *    the simple phrase counts as the same concept as the formal word,
+ *    and the helper word ("part", "out") is not counted as a new fact;
+ *  - the demo engine's own PHRASE_REPLACEMENTS are applied to the
+ *    text being checked, so a filler phrase the engine rewrites or
+ *    deletes as a unit ("in order to" -> "to", "due to the fact
+ *    that" -> "because", "it is important to note that" -> "")
+ *    compares equal to its replacement on the other side;
+ *  - contractions are expanded with the same map the negation lock
+ *    uses, so "can't" and "cannot" (a swap the engine itself makes)
+ *    are the same token, and "don't" leaves no phantom concept.
+ * On top of that, GLUE_WORDS (discourse markers: furthermore,
+ * however, also…) carry no facts, so they are excluded from both
+ * concept sets. */
 const GLUE_WORDS = new Set([
   'furthermore', 'moreover', 'however', 'therefore', 'additionally',
   'consequently', 'nevertheless', 'meanwhile', 'instead', 'also',
   'addition', 'conclusion', 'overall', 'important', 'note', 'noted',
   'why', // only surfaces via the "That is why" transition variant
+  // "yet" / "still" only ever appear here as the transition variants
+  // optimizeTransitions() itself emits for but/still — pure glue, the
+  // engine varies or drops them exactly like the words above.
+  'yet', 'still',
 ]);
 
 function conceptSet(text) {
-  let t = text.toLowerCase();
-  for (const simple of Object.values(SYNONYMS)) {
-    if (simple.includes(' ')) {
-      const re = new RegExp(`\\b${simple.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
-      t = t.replace(re, simple.split(' ')[0]);
-    }
-  }
-  const freq = contentWordFreq(t);
+  // All equivalence normalisation (multi-word synonyms, the engine's
+  // own phrase swaps, contraction expansion) happens inside
+  // contentWordList — see normalizeForCheck — identically for both
+  // sides, so this function only has to drop the glue words.
+  const freq = contentWordFreq(text);
   const set = new Set();
   for (const key of freq.keys()) {
     if (!GLUE_WORDS.has(key)) set.add(key);
@@ -1059,15 +1231,26 @@ async function humanize(text, mode = 'Natural', intensity = 'Medium', options = 
       && (safePurpose === 'Essay' || safePurpose === 'Assignment');
     if (!formalGuard) tune.contraction = stats.usesContractions ? 'on' : 'off';
   }
-  const strategies = safeDepth === 'Basic' ? ['A'] : ['A', 'B', 'C'];
+  const strategies = safeDepth === 'Basic' ? ['A'] : ['A', 'B', 'C', 'D'];
 
   /* NATURALNESS OPTIMIZATION LOOP: generate several candidates, run
    * EVERY one through the full meaning gate first, and only then —
-   * among the candidates that passed — pick the best selection score
-   * (naturalness + voice-match bonus). The gate always outranks the
-   * score: a meaning-flawed candidate is never selected, however
-   * natural it reads. Depth Basic generates a single candidate and
-   * single-verifies it; the gate conditions are identical. */
+   * among the candidates that passed — pick the best selection score:
+   *
+   *   selectionScore = naturalness
+   *                  + min(22.5, 1.5 x max(0, meaning - 85))
+   *                  + voice-match bonus (<= +12, Custom Voice only)
+   *
+   * The meaning term (v3.1) strongly rewards fidelity above the gate
+   * line: a candidate at meaning 95 earns +15 over one at 85 with the
+   * same naturalness, and the bonus caps at meaning 100 (+22.5). One
+   * hard rule sits above the formula: a candidate that is beaten on
+   * BOTH meaning and naturalness by another passer (Pareto-dominated)
+   * can never win, whatever the bonuses say.
+   * The gate always outranks the score: a meaning-flawed candidate is
+   * never selected, however natural it reads. Depth Basic generates a
+   * single candidate and single-verifies it; the gate conditions are
+   * identical. */
   let engine = 'demo';
   const raw = [];
 
@@ -1118,7 +1301,10 @@ async function humanize(text, mode = 'Natural', intensity = 'Medium', options = 
       candidate,
       verdict,
       naturalness: nat,
-      selectionScore: nat + voiceBonus(candidate, stats),
+      // v3.1 selection score — formula documented at the loop above.
+      selectionScore: nat
+        + Math.min(22.5, 1.5 * Math.max(0, verdict.checks.meaningScore - 85))
+        + voiceBonus(candidate, stats),
     };
     if (verdict.accepted) {
       passed.push(entry);
@@ -1130,7 +1316,11 @@ async function humanize(text, mode = 'Natural', intensity = 'Medium', options = 
 
   if (passed.length > 0) {
     passed.sort((a, b) => b.selectionScore - a.selectionScore);
-    const winner = passed[0];
+    // Pareto guard (v3.1): the winner is the best-scoring candidate
+    // that no other passer beats on BOTH meaning and naturalness.
+    const winner = passed.find((p) => !passed.some((q) => q !== p
+      && q.verdict.checks.meaningScore > p.verdict.checks.meaningScore
+      && q.naturalness > p.naturalness)) || passed[0];
     const winnerChecks = {
       ...winner.verdict.checks,
       naturalnessScore: winner.naturalness,
@@ -1165,7 +1355,7 @@ async function humanize(text, mode = 'Natural', intensity = 'Medium', options = 
           ...(stats ? { voiceMatch: true } : {}),
         },
       })),
-      winnerIndex: 0,
+      winnerIndex: passed.indexOf(winner),
       status: 'Accepted',
     };
   }
@@ -1200,8 +1390,327 @@ async function humanize(text, mode = 'Natural', intensity = 'Medium', options = 
   };
 }
 
+/* ================================================================== */
+/* PROFESSOR VIEW — analyzeText(text)                                  */
+/* A Turnitin-STYLE instructor AI-writing report, heuristic edition.   */
+/* Design follows the Turnitin research report (§8 clone design + the  */
+/* report-layout / indicator sections): the percentage is the share    */
+/* of QUALIFYING sentences (prose sentences in long-form writing;      */
+/* lists, headings and quoted blocks are excluded) whose per-sentence  */
+/* AI-pattern score crosses a threshold. Display states mirror         */
+/* Turnitin's post-July-2024 rules exactly:                            */
+/*   0%        -> "0%", no highlights                                  */
+/*   1–19%     -> "*%" ONLY — no number and no highlights anywhere,    */
+/*                because false positives are more likely in that band */
+/*   20–100%   -> numeric %, flagged sentences highlighted blue        */
+/* Intake mirrors Turnitin's file rules: at least 300 words of prose   */
+/* for a report at all, and a 30,000-word ceiling.                     */
+/*                                                                     */
+/* HONESTY: this is NOT Turnitin. There is no proprietary transformer  */
+/* model and no plagiarism/similarity database behind it — the         */
+/* per-sentence score is a transparent heuristic over surface signals  */
+/* only, and its percentages are UNVALIDATED estimates. Turnitin's     */
+/* own guidance applies verbatim in spirit: an AI score is a single    */
+/* data point, it may misidentify human and AI text, and it must       */
+/* never be the sole basis for adverse action against a student.       */
+/*                                                                     */
+/* Per-sentence AI-pattern score (0..1), documented weights:           */
+/*   0.45  AI-marker / stock phrases in the sentence (AI_MARKERS list, */
+/*         0.6 per occurrence, capped at 1)                            */
+/*   0.20  formulaic starter: a stock transition/opener, or the same   */
+/*         content-word starter as the previous sentence (0.6)         */
+/*   0.20  uniform structure: sentence length close to the document    */
+/*         mean, discounted to 25% when the sentence carries           */
+/*         "specifics" (a number, a quote, a contraction, or a         */
+/*         mid-sentence capitalised word)                              */
+/*   0.15  low lexical variety inside the sentence (stem type/token    */
+/*         ratio below 0.75, scaled)                                   */
+/* A sentence is FLAGGED at score >= AN_FLAG_THRESHOLD (0.65).         */
+/* ================================================================== */
+const AN_FLAG_THRESHOLD = 0.65;
+const AN_MIN_WORDS = 300;
+const AN_MAX_WORDS = 30000;
+
+const AN_STOCK_OPENERS = [
+  'furthermore', 'moreover', 'additionally', 'in addition', 'in conclusion',
+  'overall', 'therefore', 'consequently', 'nevertheless', 'in summary',
+  'to sum up', 'it is important to note', 'it should be noted',
+  'it is worth mentioning', 'when it comes to', "in today's",
+  'in the modern world', 'in recent years', 'first and foremost',
+  'needless to say', 'lastly', 'in essence', 'in this essay',
+  'this essay will', 'with the advancement of', 'as mentioned earlier',
+];
+const AN_STARTER_STOP = new Set([
+  'the', 'a', 'an', 'it', 'he', 'she', 'they', 'we', 'i', 'my', 'his',
+  'her', 'their', 'this', 'that', 'in', 'on', 'at', 'as', 'but', 'and',
+  'so', 'if', 'when', 'while',
+]);
+
+function anWordCount(s) {
+  return s.trim() ? s.trim().split(/\s+/).filter(Boolean).length : 0;
+}
+
+function anStem(w) {
+  let s = w.replace(/['-]/g, '');
+  if (s.length > 5 && s.endsWith('ing')) s = s.slice(0, -3);
+  else if (s.length > 4 && s.endsWith('ed')) s = s.slice(0, -2);
+  else if (s.length > 3 && s.endsWith('es')) s = s.slice(0, -2);
+  else if (s.length > 3 && s.endsWith('s') && !s.endsWith('ss')) s = s.slice(0, -1);
+  return s;
+}
+
+/* Split the raw text into ordered segments: prose sentences (the only
+ * QUALIFYING text) plus excluded non-prose lines (list items, ALL-CAPS
+ * short headings, quoted blocks), each with its character offset in the
+ * original text so integrity flags can be located. */
+function anSegments(text) {
+  const segments = [];
+  const lines = text.split('\n');
+  let offset = 0;
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\r$/, '');
+    const lineStart = offset;
+    offset += rawLine.length + 1;
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const fromThisLine = [];
+    const wordLike = trimmed.match(/[A-Za-z][A-Za-z'-]*/g) || [];
+    const isList = /^\s*(?:[-*•▪◦]|\d{1,3}[.)])\s+\S/.test(line);
+    const isQuoteBlock = /^\s*>/.test(line)
+      || (/^\s*["“]/.test(line) && /["”]\s*$/.test(line));
+    const isHeading = wordLike.length > 0 && wordLike.length <= 10
+      && !/[a-z]/.test(trimmed) && /[A-Z]/.test(trimmed);
+    if (isList || isQuoteBlock || isHeading) {
+      fromThisLine.push({
+        kind: 'excluded',
+        sub: isList ? 'list item' : isQuoteBlock ? 'quoted block' : 'heading',
+        text: trimmed,
+        start: lineStart + line.indexOf(trimmed),
+        flagged: false, score: null,
+      });
+    } else {
+      const re = /[^.!?]+(?:[.!?]+["'”’)]*)?/g;
+      let m;
+      while ((m = re.exec(line)) !== null) {
+        const raw = m[0];
+        const t = raw.trim();
+        if (!/[A-Za-z0-9]/.test(t)) continue;
+        const lead = raw.length - raw.trimStart().length;
+        fromThisLine.push({
+          kind: 'prose', sub: 'sentence', text: t,
+          start: lineStart + m.index + lead,
+          flagged: false, score: null,
+        });
+      }
+    }
+    if (fromThisLine.length && segments.length) fromThisLine[0].newLine = true;
+    segments.push(...fromThisLine);
+  }
+  segments.forEach((s, i) => { s.index = i; });
+  return segments;
+}
+
+function anSentenceScore(sentence, prevStarter, meanLen) {
+  const lower = sentence.toLowerCase();
+  const words = lower.match(/[a-z][a-z'-]*/g) || [];
+
+  // (1) AI-marker / stock phrases
+  const markerComp = Math.min(1, countAiMarkers(sentence) * 0.6);
+
+  // (2) formulaic starter
+  let starterComp = 0;
+  const stockHit = AN_STOCK_OPENERS.some(
+    (p) => lower === p || lower.startsWith(`${p} `) || lower.startsWith(`${p},`),
+  ) || /^(first|second|third|finally),\s/.test(lower);
+  const firstWord = words.length ? words[0] : '';
+  if (stockHit) starterComp = 1;
+  else if (firstWord && firstWord === prevStarter && !AN_STARTER_STOP.has(firstWord)) starterComp = 0.6;
+
+  // (3) uniform structure, discounted by "specifics"
+  let uniformComp = 0;
+  if (meanLen > 0) {
+    const uniformity = 1 - Math.min(1, Math.abs(words.length - meanLen) / Math.max(6, meanLen * 0.6));
+    const tokens = sentence.split(/\s+/);
+    const hasSpecifics = /\d/.test(sentence) || /["“”]/.test(sentence)
+      || /[a-z]'[a-z]/i.test(sentence)
+      || tokens.slice(1).some((t) => /^[A-Z][a-z]+/.test(t));
+    uniformComp = uniformity * (hasSpecifics ? 0.25 : 1);
+  }
+
+  // (4) low lexical variety within the sentence
+  let lexicalComp = 0;
+  if (words.length >= 4) {
+    const ttr = new Set(words.map(anStem)).size / words.length;
+    lexicalComp = Math.min(1, Math.max(0, (0.75 - ttr) / 0.45));
+  }
+
+  const score = 0.45 * markerComp + 0.20 * starterComp
+    + 0.20 * uniformComp + 0.15 * lexicalComp;
+  return Math.round(Math.min(1, Math.max(0, score)) * 1000) / 1000;
+}
+
+const AN_HIDDEN = {
+  '\u200B': ['U+200B', 'ZERO WIDTH SPACE'],
+  '\u200C': ['U+200C', 'ZERO WIDTH NON-JOINER'],
+  '\u200D': ['U+200D', 'ZERO WIDTH JOINER'],
+  '\uFEFF': ['U+FEFF', 'ZERO WIDTH NO-BREAK SPACE (BYTE ORDER MARK)'],
+};
+
+function anFlags(text, segments) {
+  const locate = (pos) => {
+    let found = null;
+    for (const s of segments) { if (s.start <= pos) found = s; else break; }
+    return found;
+  };
+  const snippet = (seg) => (seg ? seg.text.slice(0, 90) : '');
+
+  // (a) hidden / zero-width characters
+  const hiddenByCode = new Map();
+  let hiddenCount = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const meta = AN_HIDDEN[text[i]];
+    if (!meta) continue;
+    hiddenCount += 1;
+    if (!hiddenByCode.has(meta[0])) {
+      const seg = locate(i);
+      hiddenByCode.set(meta[0], {
+        code: meta[0], name: meta[1], count: 0,
+        segment: seg ? seg.index : null, snippet: snippet(seg),
+      });
+    }
+    hiddenByCode.get(meta[0]).count += 1;
+  }
+
+  // (b) replaced characters: Cyrillic/Greek lookalikes inside Latin words
+  const homoWords = [];
+  let homoChars = 0;
+  const wordRe = /[\p{L}\p{M}]+/gu;
+  let m;
+  while ((m = wordRe.exec(text)) !== null) {
+    const w = m[0];
+    if (!/[A-Za-z]/.test(w)) continue; // purely non-Latin words are not "replaced characters"
+    const bad = [...w].filter((c) => /[\u0370-\u03FF\u0400-\u04FF]/.test(c));
+    if (!bad.length) continue;
+    homoChars += bad.length;
+    const seg = locate(m.index);
+    homoWords.push({
+      word: w,
+      chars: bad.map((c) => ({
+        char: c,
+        code: `U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`,
+        script: /[\u0400-\u04FF]/.test(c) ? 'Cyrillic' : 'Greek',
+      })),
+      segment: seg ? seg.index : null,
+      snippet: snippet(seg),
+    });
+  }
+
+  return {
+    hidden: { count: hiddenCount, items: [...hiddenByCode.values()] },
+    homoglyphs: { count: homoChars, words: homoWords },
+    total: (hiddenCount > 0 ? 1 : 0) + (homoChars > 0 ? 1 : 0),
+  };
+}
+
+const AN_US_WORDS = [
+  'color', 'behavior', 'favorite', 'honor', 'labor', 'neighbor', 'center',
+  'theater', 'organize', 'organized', 'organization', 'recognize',
+  'analyze', 'defense', 'catalog', 'traveled', 'traveling', 'modeling',
+];
+const AN_UK_WORDS = [
+  'colour', 'behaviour', 'favourite', 'honour', 'labour', 'neighbour',
+  'centre', 'theatre', 'organise', 'organised', 'organisation',
+  'recognise', 'analyse', 'defence', 'catalogue', 'travelled',
+  'travelling', 'modelling',
+];
+
+function anSpelling(text) {
+  const lower = text.toLowerCase();
+  const count = (list) => list.reduce((acc, w) => {
+    const hits = lower.match(new RegExp(`\\b${w}\\b`, 'g'));
+    return acc + (hits ? hits.length : 0);
+  }, 0);
+  return { us: count(AN_US_WORDS), uk: count(AN_UK_WORDS) };
+}
+
+function analyzeText(text) {
+  const raw = typeof text === 'string' ? text : '';
+  const segments = anSegments(raw);
+  const prose = segments.filter((s) => s.kind === 'prose');
+  const totalWords = anWordCount(raw);
+  const qualifyingWords = prose.reduce((a, s) => a + anWordCount(s.text), 0);
+  const flags = anFlags(raw, segments);
+  const base = {
+    threshold: AN_FLAG_THRESHOLD,
+    counts: {
+      totalWords,
+      qualifyingWords,
+      totalSentences: segments.length,
+      qualifyingSentences: prose.length,
+      excludedSegments: segments.length - prose.length,
+    },
+    sentences: segments,
+    details: {
+      avgSentenceLength: prose.length
+        ? Math.round((qualifyingWords / prose.length) * 10) / 10 : 0,
+      flaggedCount: null,
+      spelling: anSpelling(raw),
+    },
+    flags,
+  };
+
+  if (totalWords < AN_MIN_WORDS || prose.length === 0) {
+    return {
+      ...base, state: 'tooShort', displayScore: null, percent: null,
+      interpretation: `Not enough prose to analyse — a Turnitin-style report needs at least ${AN_MIN_WORDS} words of long-form prose, because very short texts give unstable, all-or-nothing results. This text has ${totalWords} word${totalWords === 1 ? '' : 's'}${prose.length === 0 && totalWords >= AN_MIN_WORDS ? ' and no prose sentences at all' : ''}. Paste a longer piece of writing (reports cover up to ${AN_MAX_WORDS.toLocaleString('en-US')} words).`,
+    };
+  }
+  if (totalWords > AN_MAX_WORDS) {
+    return {
+      ...base, state: 'tooLong', displayScore: null, percent: null,
+      interpretation: `This text is over the ${AN_MAX_WORDS.toLocaleString('en-US')}-word ceiling for an AI-writing report. Please analyse a shorter extract.`,
+    };
+  }
+
+  const meanLen = qualifyingWords / prose.length;
+  let prevStarter = '';
+  for (const s of prose) {
+    s.score = anSentenceScore(s.text, prevStarter, meanLen);
+    s.flagged = s.score >= AN_FLAG_THRESHOLD;
+    const w = s.text.toLowerCase().match(/[a-z][a-z'-]*/);
+    prevStarter = w ? w[0] : '';
+  }
+  const flaggedCount = prose.filter((s) => s.flagged).length;
+  const percent = Math.round((100 * flaggedCount) / prose.length);
+
+  if (percent === 0) {
+    return {
+      ...base, state: 'zero', displayScore: '0%', percent: 0,
+      details: { ...base.details, flaggedCount: 0 },
+      interpretation: 'No AI-pattern sentences found in the qualifying text.',
+    };
+  }
+  if (percent < 20) {
+    // Turnitin's suppression rule, applied at the source: in the 1–19%
+    // band NO number and NO highlights are attributed, because false
+    // positives are more likely there. Flag/score data is stripped from
+    // the payload itself, so the UI cannot leak it.
+    for (const s of prose) { s.flagged = false; s.score = null; }
+    return {
+      ...base, state: 'low', displayScore: '*%', percent: null,
+      interpretation: 'A small share of qualifying sentences showed AI-like patterns. The score is shown as *% with no number and no highlights, because false positives are more likely in this range — treat it only as a prompt for a closer look, not as a finding.',
+    };
+  }
+  return {
+    ...base, state: 'scored', displayScore: `${percent}%`, percent,
+    details: { ...base.details, flaggedCount },
+    interpretation: `${percent}% of the qualifying sentences crossed the AI-pattern threshold — the highlighted sentences are the ones to review first.`,
+  };
+}
+
 module.exports = {
   humanize,
+  analyzeText,
   llmConfig,
   MODES,
   INTENSITIES,
@@ -1211,6 +1720,7 @@ module.exports = {
   // exported for testing
   _internal: {
     protectEntities, restoreEntities, demoRewrite, meaningScore,
+    normalizeForCheck, varySentenceLengths, splitSentenceAtClause,
     runChecks, verify, verifyWithDepth, extractNegations, conceptSet, GATE,
     grammarFix, optimizeTransitions, reduceRepetition,
     fleschReadingEase, repetitionIndex,
